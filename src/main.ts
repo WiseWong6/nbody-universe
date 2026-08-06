@@ -1,4 +1,5 @@
 import './style.css';
+import * as THREE from 'three';
 import { NBodySimulation } from './simulation';
 import { VortexFieldSimulation } from './vortex';
 import type { ParticleSimulation } from './simulation-interface';
@@ -78,8 +79,63 @@ const canvas = document.getElementById('scene') as HTMLCanvasElement;
 const renderer = new Renderer(canvas, params.bloom);
 
 let sim: ParticleSimulation;
-/** vortex 引擎时指向具体模拟实例（形成时长等实时参数写回用） */
+/** vortex 引擎时指向具体模拟实例（形成进度写回用） */
 let vortexSim: VortexFieldSimulation | null = null;
+/** V8：vortex 全部可视对象的统一根节点——真实空间缩放与整体主旋转都作用在它上面 */
+let vortexRoot: THREE.Group | null = null;
+/** V8：形成动画已逝真实时间（秒，未乘 timeScale） */
+let formationElapsed = 0;
+/** V8：整体主旋转轴（seed 无关，构图稳定） */
+const dominantAxis = new THREE.Vector3(0.25, 1, 0.18).normalize();
+/** ?spin=0：调试/测量用，关闭整体主旋转（排除 2D 轮廓的朝向噪声） */
+const spinEnabled = urlParams.get('spin') !== '0';
+
+/**
+ * V8 分阶段生长曲线（formationDuration 默认 5 真实秒）：
+ * - p 0~0.12（0~0.6s）：scale 0.08 → 0.14，只有核心 + 少量内层短循环线
+ * - p 0.12~0.76（0.6~3.8s）：scale 0.14 → 0.82，easeInOutCubic，循环线逐渐增多
+ * - p 0.76~1（3.8~5s）：scale 0.82 → 1.0，外围气流与雾层登场；缩放增益一路维持到
+ *   形成结束的最后一帧，压住此窗口内向心压缩的物理收缩，保证外轮廓全程单调增大，
+ *   完成后回到 V7 最终形态
+ */
+function growthScale(p: number): number {
+  if (p <= 0.12) return 0.08 + 0.06 * (p / 0.12);
+  if (p <= 0.76) {
+    const t = (p - 0.12) / 0.64;
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    return 0.14 + 0.68 * e;
+  }
+  return 0.82 + 0.18 * ((p - 0.76) / 0.24);
+}
+
+/** V8 整体主旋转速度（rad/s）：核心阶段最明显，随尺寸增大减弱，完成后极慢漂移 */
+function spinSpeed(p: number): number {
+  const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+  return 2.4 + (0.12 - 2.4) * e;
+}
+
+/**
+ * V8 粒子可见包络（相对 R）：只有 r < envelope 的粒子点可见（15% 软淡出带）。
+ * 实测外围粒子光晕（局部半径）在形成后段呈「山峰形」：p≈0.7 膨胀到 ~1.3R，
+ * 随后回收下潜收缩到 ~0.9R——直接显示会让外轮廓在末段回缩。
+ * 包络取一条始终贴在光晕下沿、单调上升的曲线（0.8R → 0.9R）：
+ * 真实尺寸增长仍由 vortexRoot.scale 承担，包络只削掉超出下沿的瞬态外鼓；
+ * p=1 时跳到 1.35R（> 球形约束上限 1.3R），稳态不裁剪任何粒子，最终形态与 V7 一致。
+ */
+function pointsEnvelope(p: number): number {
+  if (p >= 1) return 1.35;
+  const t = Math.min(Math.max((p - 0.55) / 0.45, 0), 1);
+  const s = t * t * (3 - 2 * t);
+  return 0.8 + 0.1 * s;
+}
+
+/** ?env= 调试用包络覆盖（相对 R，>0 时取代 pointsEnvelope） */
+const envOverride = Number(urlParams.get('env'));
+function envelopeWorld(p: number): number {
+  const rn = Number.isFinite(envOverride) && envOverride > 0 ? envOverride : pointsEnvelope(p);
+  return rn * vortexParams.radius;
+}
+
 let stars: StarField;
 let coreGlow: CoreGlow | null = null;
 let glowPlane: GlowPlane | null = null;
@@ -97,6 +153,7 @@ if (Number.isFinite(urlTs) && urlTs >= 0) vortexParams.timeScale = urlTs;
 
 function regenerate(): void {
   // 释放旧资源
+  formationElapsed = 0;
   if (stars) {
     renderer.scene.remove(stars.normal);
     renderer.scene.remove(stars.bright);
@@ -123,9 +180,13 @@ function regenerate(): void {
     vortexCore = null;
   }
   if (trails) {
-    renderer.scene.remove(trails.object);
+    if (trails.object.parent) trails.object.parent.remove(trails.object);
     trails.dispose();
     trails = null;
+  }
+  if (vortexRoot) {
+    renderer.scene.remove(vortexRoot);
+    vortexRoot = null;
   }
 
   if (engine === 'galaxy') {
@@ -171,31 +232,72 @@ function regenerate(): void {
     trails.setWidth(vortexParams.trailWidth);
     trails.setResolution(window.innerWidth, window.innerHeight);
     vortexCore.setWhiteRadius(vortexParams.coreWhiteRadius);
+    // V8：全部 vortex 可视对象挂到统一根节点——真实空间缩放与整体主旋转的载体
+    vortexRoot = new THREE.Group();
+    vortexRoot.scale.setScalar(growthScale(0));
     // ?layers= 调试图层隔离：trails / points / none
     const layers = urlParams.get('layers');
     if (layers !== 'trails' && layers !== 'none') {
-      renderer.scene.add(stars.normal);
-      renderer.scene.add(stars.bright);
+      vortexRoot.add(stars.normal);
+      vortexRoot.add(stars.bright);
     }
     if (layers !== 'trails' && layers !== 'points') {
-      renderer.scene.add(haze.mesh);
+      vortexRoot.add(haze.mesh);
       // ?core=0 调试：隔离核心层
-      if (urlParams.get('core') !== '0') renderer.scene.add(vortexCore.mesh);
+      if (urlParams.get('core') !== '0') vortexRoot.add(vortexCore.mesh);
     }
     if (layers !== 'points' && layers !== 'none') {
-      renderer.scene.add(trails.object);
+      vortexRoot.add(trails.object);
     }
+    renderer.scene.add(vortexRoot);
 
-    // V7：不做预热快进——能量球从核心开始真实生长，首帧只看到核心。
-    // 形成进度的初始 uniform 同步（暂停/首帧也正确）
+    // V8 物理预热（不可见）：快进 180 步（3 模拟秒），让向心压缩 + 回收流建立稳态，
+    // 形成完成时（t≈5s）立即呈现完整 V7 最终形态。预热时长经过校准：过短则第一波
+    // 回收下潜未完成、外圈暂时变空；过长则模拟年龄偏大、光晕在形成末段进入 V7 固有
+    // 的缓慢收缩，外轮廓会在缩放增益尾声被压回。
+    // 流线不同步预热：所有轨迹历史为空，到达各自 birthProgress 后从短弧开始生长。
+    for (let i = 0; i < 180; i++) sim.update(1 / 60);
+
+    // V8：形成动画由 tick 以真实时间驱动（无预热，首帧只见缩小后的核心）。
+    // 初始进度同步（暂停/首帧也正确）
+    vortexSim.setFormationProgress(0);
     sim.syncSpeed();
     stars.sync(sim.time);
     stars.setActiveRn(sim.activeRn ?? 1e9);
-    trails.sync(sim.time, sim.activeRn ?? 1e9);
+    stars.setMaxRadius(envelopeWorld(0));
+    trails.sync(sim.time, 0);
     haze.sync(sim.time);
-    haze.setFormation(sim.formationProgress ?? 1);
+    haze.setFormation(0);
     vortexCore.sync(sim.time);
-    vortexCore.setFormation(sim.formationProgress ?? 1);
+    vortexCore.setFormation(0);
+
+    // URL ?ff=秒：确定性快进到形成时间线上的指定真实秒（验收截图用）。
+    // 按 1/60s 步进同时推进 formationElapsed 与物理（等价实时播放），与低帧率无关。
+    const ff = Number(urlParams.get('ff'));
+    if (Number.isFinite(ff) && ff > 0 && vortexSim && trails && haze && vortexCore) {
+      const step = 1 / 60;
+      const dur = Math.max(vortexParams.formationDuration, 0.5);
+      let p = 0;
+      for (let e = 0; e < ff; e += step) {
+        formationElapsed += step;
+        p = Math.min(formationElapsed / dur, 1);
+        vortexSim.setFormationProgress(p);
+        sim.update(step * vortexParams.timeScale);
+        trails.sync(sim.time, p);
+        // 与实时 tick 一致：主旋转按每帧增量积分（而非一次总转），
+        // 保证各验收截图的朝向与真实播放该时刻一致
+        if (spinEnabled) vortexRoot.rotateOnAxis(dominantAxis, spinSpeed(p) * step);
+      }
+      vortexRoot.scale.setScalar(growthScale(p));
+      sim.syncSpeed();
+      stars.sync(sim.time);
+      stars.setActiveRn(sim.activeRn ?? 1e9);
+      stars.setMaxRadius(envelopeWorld(p));
+      haze.sync(sim.time);
+      haze.setFormation(p);
+      vortexCore.sync(sim.time);
+      vortexCore.setFormation(p);
+    }
 
     const azim = Number.isFinite(urlAzim) ? urlAzim : 28;
     renderer.frameVortexCamera(vortexParams.radius, azim);
@@ -203,7 +305,8 @@ function regenerate(): void {
     // Bloom 克制档：threshold 0.75 只拾取最亮的流线头部与核心，
     // strength 0.38 保留蓝色色相，不把高亮蓝漂成纯白
     renderer.setBloomParams(vortexParams.bloomStrength, 0.3, 0.75);
-    renderer.controls.autoRotate = true;
+    // V8：关闭相机自动环绕——旋转由能量球自身的主旋转表达，不用相机转动冒充
+    renderer.controls.autoRotate = false;
     renderer.controls.enabled = true;
   }
 }
@@ -227,10 +330,6 @@ const ui = new Ui(params, vortexParams, engine, {
   onHudToggle: (v) => ui.setHudVisible(v),
   onTrailChange: (v) => trails?.setPersistence(v),
   onTrailWidthChange: (v) => trails?.setWidth(v),
-  // 形成时长实时生效：直接写回模拟内部的参数副本（step 每步读取）
-  onFormationChange: (v) => {
-    if (vortexSim) vortexSim.params.formationDuration = v;
-  },
   // 颜色系统四项实时调整（无需重建）：饱和度 / 流线亮度 / 核心白半径 / 泛光强度
   onColorLive: () => {
     trails?.setSaturation(vortexParams.blueSaturation);
@@ -260,23 +359,44 @@ function tick(now: number): void {
     return;
   }
 
-  // 帧间隔截断，防止后台切回时一口气追太多步
-  const frameDt = Math.min((now - lastTime) / 1000, 0.05);
+  // 帧间隔截断，防止后台切回时一口气追太多步（物理用）
+  const realDt = (now - lastTime) / 1000; // 真实墙钟间隔（形成动画用）
+  const frameDt = Math.min(realDt, 0.05);
   lastTime = now;
 
   if (!params.paused) {
+    // V8：形成动画使用真实墙钟时间（未截断、未乘 timeScale），默认 5 秒完成。
+    // 低帧率设备上物理步进会放慢，但形成时长不变。
+    let formP = 1;
+    if (engine === 'vortex' && vortexRoot && vortexSim) {
+      formationElapsed += realDt;
+      formP = Math.min(
+        formationElapsed / Math.max(vortexParams.formationDuration, 0.5),
+        1
+      );
+      // 真实空间缩放：视觉尺寸只由 vortexRoot.scale 决定（activeRn 不再承担尺寸职责）
+      vortexRoot.scale.setScalar(growthScale(formP));
+      // 统一主旋转：核心阶段最明显，随尺寸增大减弱，完成后只剩极慢漂移
+      if (spinEnabled) vortexRoot.rotateOnAxis(dominantAxis, spinSpeed(formP) * realDt);
+      // 形成进度写回模拟：activeRn 只控制各层粒子的出现顺序
+      vortexSim.setFormationProgress(formP);
+    }
+
     // Time Scale 只影响播放速度，物理步长不变（稳定性/确定性不受影响）
     const ts = engine === 'galaxy' ? params.timeScale : vortexParams.timeScale;
     sim.update(frameDt * ts);
     sim.syncSpeed();
     stars.sync(sim.time);
     coreGlow?.sync(sim.time);
-    // 流线跟随模拟时间记录：Time Scale 降低时弧线长度不变，暂停时冻结
-    trails?.sync(sim.time, sim.activeRn ?? 1e9);
+    // 流线跟随模拟时间记录：Time Scale 降低时弧线长度不变，暂停时冻结；
+    // formP 驱动每条轨迹的 birthProgress（开始记录 + 淡入）
+    trails?.sync(sim.time, formP);
     haze?.sync(sim.time);
     vortexCore?.sync(sim.time);
-    // V7 形成生长：激活半径与形成进度驱动各层显隐
+    // 形成进度驱动各层显隐（粒子层顺序 / 核心与雾淡入）
     stars.setActiveRn(sim.activeRn ?? 1e9);
+    // V8 粒子可见包络：仅 vortex 生效（galaxy 保持默认 1e9 不裁剪）
+    if (engine === 'vortex') stars.setMaxRadius(envelopeWorld(formP));
     haze?.setFormation(sim.formationProgress ?? 1);
     vortexCore?.setFormation(sim.formationProgress ?? 1);
   }

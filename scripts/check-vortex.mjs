@@ -13,23 +13,28 @@ const base = {
 const sim = new VortexFieldSimulation(base);
 const R = base.radius;
 
-// ---- V7 形成生长断言：activeRadius 从核心向外扩张，激活比例单调增长 ----
+// ---- V8 形成断言：progress 由外部（setFormationProgress）驱动，
+// activeRn 只控制各层粒子的出现顺序，与模拟时间解耦 ----
 function activeRatio() {
   let act = 0;
   for (let i = 0; i < sim.count; i++) if (sim.birthRadius[i] <= sim.activeRn) act++;
   return act / sim.count;
 }
+sim.setFormationProgress(0);
 const ar0 = activeRatio();
-for (let f = 0; f < 3 * 60; f++) sim.update(1 / 60); // 3 模拟秒（形成 50%）
+sim.setFormationProgress(0.5);
+for (let f = 0; f < 60; f++) sim.update(1 / 60);
 const arMid = activeRatio();
 const activeRnMid = sim.activeRn;
-for (let f = 0; f < 4 * 60; f++) sim.update(1 / 60); // 累计 7 模拟秒 > formationDuration
+sim.setFormationProgress(1);
+for (let f = 0; f < 60; f++) sim.update(1 / 60);
 const arFull = activeRatio();
-console.log(`formation: t=0 激活=${(100 * ar0).toFixed(1)}% activeRn=${base.coreRadiusRatio} | t=3s 激活=${(100 * arMid).toFixed(1)}% activeRn=${activeRnMid.toFixed(2)} | t=7s 激活=${(100 * arFull).toFixed(1)}%`);
-console.log(`formation 断言: t0<25%=${ar0 < 0.25 ? 'PASS' : 'FAIL'} 中段增长=${arMid > ar0 + 0.2 ? 'PASS' : 'FAIL'} 完成≈100%=${arFull > 0.99 ? 'PASS' : 'FAIL'}`);
+console.log(`formation: p=0 激活=${(100 * ar0).toFixed(1)}% | p=0.5 激活=${(100 * arMid).toFixed(1)}% activeRn=${activeRnMid.toFixed(2)} | p=1 激活=${(100 * arFull).toFixed(1)}%`);
+console.log(`formation 断言: p0<25%=${ar0 < 0.25 ? 'PASS' : 'FAIL'} 中段增长=${arMid > ar0 + 0.1 ? 'PASS' : 'FAIL'} 完成≈100%=${arFull > 0.99 ? 'PASS' : 'FAIL'}`);
 
-// 回到 t=0 重新计时跑稳定性（init 重置形成进度）
+// 回到 t=0 重新计时跑稳定性（init 重置形成进度，直接置为完成态）
 sim.init();
+sim.setFormationProgress(1);
 
 function stats(label) {
   let nan = 0, outside = 0, farOut = 0, center = 0, rSum = 0, vSum = 0;

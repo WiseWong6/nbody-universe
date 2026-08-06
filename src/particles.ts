@@ -36,6 +36,7 @@ const VERTEX_SHADER = /* glsl */ `
   uniform float uTrail; // 流线拉伸强度（0 = 圆形点）
   uniform float uBoost; // 整体亮度增益（vortex 用，galaxy 保持 1.0）
   uniform float uActiveRn; // 当前激活半径：aBirth > uActiveRn 的粒子裁剪（V7 形成生长）
+  uniform float uMaxRadius; // 可见包络（世界单位）：当前半径超出者软淡出（V8 形成生长；默认 1e9 不生效）
 
   varying vec3 vColor;
   varying float vAlpha;
@@ -90,8 +91,12 @@ const VERTEX_SHADER = /* glsl */ `
     float lum = max(max(col.r, col.g), col.b);
     if (lum > uMaxLum) col *= uMaxLum / lum;
 
+    // V8 可见包络：按当前半径软淡出（15% 过渡带，避免硬壳边缘）。
+    // 形成期包络单调扩张，兜住外围光晕的瞬态外鼓；稳态包络 1.35R 不裁剪任何粒子。
+    float edgeF = 1.0 - smoothstep(uMaxRadius * 0.85, uMaxRadius, length(position));
+
     vColor = col;
-    vAlpha = min((0.62 + 0.3 * min(speedNorm, 1.0)) * uBoost, 1.0);
+    vAlpha = min((0.62 + 0.3 * min(speedNorm, 1.0)) * uBoost, 1.0) * edgeF;
 
     gl_Position = clip1;
   }
@@ -154,6 +159,7 @@ function createStarMaterial(
       uTrail: { value: 0 },
       uBoost: { value: boost },
       uActiveRn: { value: 1e9 }, // 默认全可见（galaxy 无形成概念）
+      uMaxRadius: { value: 1e9 }, // 默认不裁剪（galaxy 无形成包络）
     },
     transparent: true,
     depthWrite: false,
@@ -173,6 +179,8 @@ export interface StarField {
   setTrail(v: number): void;
   /** 设置当前激活半径（相对 R，Vortex V7 形成生长；未激活粒子裁剪） */
   setActiveRn(rn: number): void;
+  /** 设置可见包络（世界单位，V8 形成生长；超出者按当前半径软淡出） */
+  setMaxRadius(r: number): void;
   dispose(): void;
 }
 
@@ -256,6 +264,10 @@ export function createStarField(
     setActiveRn(rn: number) {
       normalMat.uniforms.uActiveRn.value = rn;
       brightMat.uniforms.uActiveRn.value = rn;
+    },
+    setMaxRadius(r: number) {
+      normalMat.uniforms.uMaxRadius.value = r;
+      brightMat.uniforms.uMaxRadius.value = r;
     },
     dispose() {
       normalGeo.dispose();
@@ -557,8 +569,10 @@ const TRAIL_HISTORY = 96;
 /** 记录间隔（模拟秒）：跟随模拟时间，与播放速度解耦 */
 const TRAIL_DT = 1 / 60;
 
-/** 流线三层分组（V7）：内层高亮 / 中层主线 / 外层气流。
- *  LineMaterial 只有一个全局 linewidth，拆 3 个 LineSegments2 是分层宽度的兼容做法。 */
+/** 流线三层分组（V8）：内层高亮 / 中层主线 / 外层气流，各自独立 LineSegments2
+ * （LineMaterial 只有一个全局 linewidth，分层是分层宽度的兼容做法）。
+ * pMin/pMax：该层轨迹的 birthProgress 时间线（真实形成进度 0~1）——
+ * progress 到达 birthProgress 后该轨迹才开始记录历史并淡入。 */
 interface TrailLayerSpec {
   /** 占 trailDensity 的比例 */
   frac: number;
@@ -566,20 +580,23 @@ interface TrailLayerSpec {
   widthMul: number;
   /** 不透明度（additive 堆叠上限） */
   opacity: number;
-  /** 代表粒子激活半径范围（决定分组与出现顺序） */
+  /** 代表粒子激活半径范围（决定分组） */
   birthMin: number;
   birthMax: number;
+  /** 该层轨迹的出现进度区间 */
+  pMin: number;
+  pMax: number;
   /** 颜色后处理：highlight 偏蓝白 / main 族色 / outer 深蓝淡化 */
   tone: 'highlight' | 'main' | 'outer';
 }
 
 const TRAIL_LAYERS: TrailLayerSpec[] = [
-  // 内层高亮线：少而细亮、偏蓝白，最先出现
-  { frac: 0.12, widthMul: 1.3, opacity: 0.9, birthMin: 0.0, birthMax: 0.3, tone: 'highlight' },
-  // 中层主线：主体亮蓝/电蓝
-  { frac: 0.6, widthMul: 1.0, opacity: 0.8, birthMin: 0.2, birthMax: 0.75, tone: 'main' },
-  // 外层气流线：更轻更淡更深蓝，形成收尾才出现
-  { frac: 0.28, widthMul: 0.6, opacity: 0.6, birthMin: 0.7, birthMax: 1.01, tone: 'outer' },
+  // 内层高亮线：少而细亮、偏蓝白，核心阶段就出现
+  { frac: 0.12, widthMul: 1.3, opacity: 0.9, birthMin: 0.0, birthMax: 0.3, pMin: 0.05, pMax: 0.26, tone: 'highlight' },
+  // 中层主线：主体亮蓝/电蓝，生长主阶段逐渐加入
+  { frac: 0.6, widthMul: 1.0, opacity: 0.8, birthMin: 0.2, birthMax: 0.75, pMin: 0.25, pMax: 0.75, tone: 'main' },
+  // 外层气流线：更轻更淡更深蓝，形成收尾才出现（错峰：避免在中层尚未凝聚时外圈先亮）
+  { frac: 0.28, widthMul: 0.6, opacity: 0.6, birthMin: 0.7, birthMax: 1.01, pMin: 0.78, pMax: 1.0, tone: 'outer' },
 ];
 
 export interface TrailRenderer {
@@ -588,9 +605,11 @@ export interface TrailRenderer {
    * 每渲染帧调用：按模拟时间 60Hz 记录历史位置并刷新线段。
    * 跟随 sim.time——Time Scale 降低时弧线空间长度不变，
    * 暂停时历史冻结、长弧保持可见。
-   * activeRn：当前激活半径（V7 形成生长），未激活轨迹整条隐藏。
+   * progress：真实形成进度（0~1，main 以真实时间驱动，与 timeScale 无关）。
+   * 每条轨迹有 birthProgress：到达后才开始记录历史（从短弧逐渐变长）并淡入，
+   * 不存在「突然出现的完整大圆轨迹」。
    */
-  sync(simTime: number, activeRn?: number): void;
+  sync(simTime: number, progress?: number): void;
   /** 轨迹持续时间（模拟秒），实时生效 */
   setPersistence(seconds: number): void;
   /** 流线亮度倍率（只控制明暗，不改色相），实时生效 */
@@ -610,8 +629,10 @@ export interface TrailRenderer {
  * 保存最近 96 个 60Hz 采样的历史位置，用 LineSegments2（fat lines）绘制头亮尾淡的长弧。
  * 颜色系统：色相 = 粒子所属轨道族的稳定基础色（init 分配，全程不变），
  * 半径只控制亮度（外暗内亮）；蓝白高亮只属于内层 highlight 线与核心层。
- * 每条轨迹带激活半径（代表粒子的 birthRn），activeRn 未长到该层时整条隐藏——
- * 内层线先出现，外层气流线最后登场。回收重生跳变时单条轨迹清零重记。
+ * 每条轨迹带 birthProgress（由代表粒子在层内半径区间映射到层时间线）：
+ * progress 到达后才开始记录历史并淡入——轨迹从短弧逐渐变长，
+ * 内层线先出现，外层气流线最后登场，不存在突然出现的完整大圆轨迹。
+ * 回收重生跳变时单条轨迹清零重记。
  * Trail Persistence 只控制可见段数，与物理速度完全解耦。
  */
 export function createTrailRenderer(
@@ -642,6 +663,8 @@ export function createTrailRenderer(
     count: number;
     indices: Int32Array;
     trailBirth: Float32Array;
+    /** 每条轨迹的出现进度（progress 到达后才开始记录历史并淡入） */
+    trailP: Float32Array;
     base: Float32Array; // 每条轨迹族稳定基础色
     history: Float32Array;
     filled: Uint16Array;
@@ -682,14 +705,22 @@ export function createTrailRenderer(
       }
     }
 
-    // 每条轨迹的激活半径与族稳定基础色
+    // 每条轨迹的激活半径、出现进度与族稳定基础色
     const trailBirth = new Float32Array(count);
+    const trailP = new Float32Array(count);
     const base = new Float32Array(count * 3);
     {
       const fam = sim.particleFamily;
       const fc = sim.famColors;
+      const span = Math.max(spec.birthMax - spec.birthMin, 1e-6);
       for (let t = 0; t < count; t++) {
         trailBirth[t] = birth ? birth[indices[t]] : 0;
+        // 出现进度：粒子在层内半径区间中的相对位置 → 映射到层时间线
+        // （无形成概念的模拟 trailP=0，全部立即可见）
+        const t01 = birth
+          ? Math.min(Math.max((trailBirth[t] - spec.birthMin) / span, 0), 1)
+          : 0;
+        trailP[t] = spec.pMin + t01 * (spec.pMax - spec.pMin);
         if (fam && fc) {
           const g = fam[indices[t]] * 3;
           base[t * 3] = fc[g];
@@ -731,6 +762,7 @@ export function createTrailRenderer(
       count,
       indices,
       trailBirth,
+      trailP,
       base,
       history: new Float32Array(count * H * 3),
       filled: new Uint16Array(count),
@@ -753,11 +785,14 @@ export function createTrailRenderer(
   let brightness = 1.0;
   let saturation = 1.4;
 
-  function record(): void {
+  function record(progress: number): void {
     cursor = (cursor + 1) % H;
     for (const layer of layers) {
-      const { count, indices, history, filled } = layer;
+      const { count, indices, trailP, history, filled } = layer;
       for (let t = 0; t < count; t++) {
+        // V8 出现进度：progress 到达 birthProgress 之前不记录历史——
+        // 激活时 filled=0，从当前点开始记录，轨迹从短弧逐渐变长
+        if (progress < trailP[t]) continue;
         const io = indices[t] * 3;
         const nx = pos[io];
         const ny = pos[io + 1];
@@ -790,16 +825,17 @@ export function createTrailRenderer(
     return 0.85 - 0.35 * Math.min(rn / 0.9, 1);
   }
 
-  function refresh(activeRn: number): void {
+  function refresh(progress: number): void {
     // 可见段数：persistence 秒 × 60Hz，最少 4 段
     const visible = Math.max(4, Math.min(H - 1, Math.round(persistence / TRAIL_DT)));
     for (const layer of layers) {
-      const { spec, count, trailBirth, base, history, filled, posBuf, colBuf } = layer;
+      const { spec, count, trailP, base, history, filled, posBuf, colBuf } = layer;
       const tone = spec.tone;
       let seg = 0;
       for (let t = 0; t < count; t++) {
-        // V7 形成门控：activeRadius 还没长到这一层 → 整条轨迹隐藏（additive：黑即透明）
-        const active = trailBirth[t] <= activeRn;
+        // V8 形成门控：到达 birthProgress 后淡入（0.08 进度窗口）
+        const tp = trailP[t];
+        const fade = progress <= tp ? 0 : Math.min((progress - tp) / 0.08, 1);
 
         // 族基础色 × 蓝色饱和度（围绕 luma 缩放；>1 更饱和）
         const br = base[t * 3];
@@ -848,14 +884,14 @@ export function createTrailRenderer(
           let f1 = 0;
           let f2 = 0;
           // 段 s 连接采样点 s 与 s+1：两个采样都已记录才可见（s+1 < ft）
-          if (active && s + 1 < ft && s < visible) {
+          if (fade > 0 && s + 1 < ft && s < visible) {
             // 头部最亮 → 尾部渐隐（additive：黑即透明）；
             // 指数 1.2 让外侧蓝色尾弧保持可见，不只剩内侧亮段
             f1 = Math.pow(1 - s / visible, 1.2);
             f2 = Math.pow(1 - (s + 1) / visible, 1.2);
           }
-          const m1 = f1 * depthLum(history, h1) * brightness;
-          const m2 = f2 * depthLum(history, h2) * brightness;
+          const m1 = f1 * depthLum(history, h1) * brightness * fade;
+          const m2 = f2 * depthLum(history, h2) * brightness * fade;
           colBuf[p6] = cr * m1;
           colBuf[p6 + 1] = cg * m1;
           colBuf[p6 + 2] = cb * m1;
@@ -872,15 +908,15 @@ export function createTrailRenderer(
 
   return {
     object,
-    sync(simTime: number, activeRn = 1e9) {
+    sync(simTime: number, progress = 1) {
       // 跟随模拟时间 60Hz 采样：暂停（时间冻结）不记录，长弧冻结保留
       if (lastSimTime < 0) lastSimTime = simTime - TRAIL_DT;
       if (simTime < lastSimTime) lastSimTime = simTime - TRAIL_DT; // reset 后对齐
       while (lastSimTime + TRAIL_DT <= simTime) {
-        record();
+        record(progress);
         lastSimTime += TRAIL_DT;
       }
-      refresh(activeRn);
+      refresh(progress);
     },
     setPersistence(seconds: number) {
       persistence = Math.max(0.05, seconds);

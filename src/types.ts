@@ -29,7 +29,7 @@ export interface VortexParams {
   trailBrightness: number;
   /** Bloom 泛光强度（实时生效） */
   bloomStrength: number;
-  /** 形成时长（模拟秒）：从核心到完整能量球的生长时间 */
+  /** 形成时长（真实秒，与 timeScale 无关）：从核心到完整能量球的生长时间 */
   formationDuration: number;
   /** 初始核心大小（相对球半径 R）：形成起点 activeRadius 的下限 */
   coreRadiusRatio: number;
@@ -57,7 +57,7 @@ export const DEFAULT_VORTEX: Omit<VortexParams, 'particleCount' | 'seed'> = {
   coreWhiteRadius: 0.1,
   trailBrightness: 1.0,
   bloomStrength: 0.38,
-  formationDuration: 6,
+  formationDuration: 5,
   coreRadiusRatio: 0.15,
   trailWidth: 1.3,
   trailDensity: 140,

@@ -3,18 +3,17 @@ import type { VortexParams } from './types';
 import type { ParticleSimulation } from './simulation-interface';
 
 /**
- * VortexFieldSimulation —— 三维旋涡能量球（Visual V7：从中心生长的螺旋丸模型）。
+ * VortexFieldSimulation —— 三维旋涡能量球（Visual V8：真实时间驱动的螺旋丸形成）。
  *
  * 不再是球壳轨道绕圈：Flow 粒子持续向球心流动，流动过程中被所属
  * Orbit Family 的局部旋转轴偏折，形成不规则交错、越近中心越快的螺旋流。
  *
- * V7 形成逻辑（formation）：能量球不是一次出现，而是从核心向外生长——
- *   progress   = clamp(time / formationDuration, 0, 1)
- *   activeRn   = mix(coreRadiusRatio, 1.05, easeOutCubic(progress))
- * 每个粒子带激活半径 birthRn（Core 组最小、Flow 组=初始壳层、Edge Sparks 最大），
- * 只有 birthRn <= activeRn 的粒子参与积分与着色：核心先转，内层循环线先出现，
- * 外层逐步加入，Edge Sparks 外围气流最后登场。形成后段外层粒子获得
- * outerFlowStrength 径向甩出分量（被旋转甩出的气流感），球形约束兜底不逃逸。
+ * V8 形成逻辑（formation）：形成进度由外部以真实时间驱动
+ * （setFormationProgress，与 timeScale 无关）。本模拟内 activeRn 只控制
+ * 「各层粒子的出现顺序」（Core 组最先、Flow 按壳层、Edge Sparks 最后），
+ * 真正的视觉尺寸增长由渲染层 vortexRoot.scale 完成。
+ * 形成后段（progress > 0.72）外层粒子获得 切向为主 + 轻微径向 的甩出分量
+ * （outerFlowStrength），被主轴旋转甩出的气流感，球形约束兜底不逃逸。
  *
  * 每步目标速度：
  *   target = inwardCompression + irregularSwirl + turbulence
@@ -133,6 +132,30 @@ export class VortexFieldSimulation implements ParticleSimulation {
   reset(): void {
     this.init();
   }
+
+  /**
+   * V8：由外部（main.ts）以真实时间驱动形成进度。
+   * activeRn 只决定各层粒子的出现顺序（easeInOutCubic），
+   * 视觉尺寸增长由渲染层 vortexRoot.scale 承担，二者职责分离。
+   */
+  setFormationProgress(p: number): void {
+    const cp = Math.min(Math.max(p, 0), 1);
+    this.formationProgress = cp;
+    // easeInOutCubic
+    const ease =
+      cp < 0.5 ? 4 * cp * cp * cp : 1 - Math.pow(-2 * cp + 2, 3) / 2;
+    this.activeRn =
+      this.params.coreRadiusRatio + (1.05 - this.params.coreRadiusRatio) * ease;
+    // 形成前置压缩（瞬态倍率，不改稳态公式）：p=0 时 ×1.6，p≥0.55 回到 ×1.0。
+    // 让查克拉在「小球阶段」就完成凝聚，之后视觉尺寸完全由 vortexRoot.scale 主导，
+    // 避免形成后段出现「物理收缩抵消缩放增长」的外轮廓回缩。
+    const ss0 = Math.min(cp / 0.55, 1);
+    const ss = ss0 * ss0 * (3 - 2 * ss0);
+    this.compressionBoost = 1 + 0.6 * (1 - ss);
+  }
+
+  /** 形成期向心压缩瞬态倍率（setFormationProgress 更新，稳态恒为 1） */
+  private compressionBoost = 1;
 
   dispose(): void {
     // TypedArray 由 GC 回收
@@ -598,9 +621,10 @@ export class VortexFieldSimulation implements ParticleSimulation {
       swirl * 7.5 * Math.pow((R + eps) / (r + eps), SWIRL_ALPHA) * this.famSpeedMul[g];
 
     // 向心压缩：-normalize(p)·compression·0.32R·smoothstep(0.10, 0.45, rn)
-    // 中心附近渐零（避免与回收/防坍缩打架），中外部恒定拉向球心
+    // 中心附近渐零（避免与回收/防坍缩打架），中外部恒定拉向球心；
+    // compressionBoost 是形成期瞬态倍率（稳态恒 1，见 setFormationProgress）
     const cs = Math.min(Math.max((rn - 0.1) / 0.35, 0), 1);
-    const vIn = compression * COMPRESS_BASE * R * cs * cs * (3 - 2 * cs);
+    const vIn = compression * this.compressionBoost * COMPRESS_BASE * R * cs * cs * (3 - 2 * cs);
     const inx = (-px / r) * vIn;
     const iny = (-py / r) * vIn;
     const inz = (-pz / r) * vIn;
@@ -651,21 +675,23 @@ export class VortexFieldSimulation implements ParticleSimulation {
   }
 
   step(): void {
-    const { confinement, drag, radius: R, formationDuration, coreRadiusRatio, outerFlowStrength } =
-      this.params;
+    const { confinement, drag, radius: R, outerFlowStrength } = this.params;
     const n = this.count;
     const { position, velocity, family, birthRadius } = this;
 
     this.precessAxes();
 
-    // ---- V7 形成生长：activeRadius 从核心向外扩张（easeOutCubic）----
-    const progress = Math.min(this.time / Math.max(formationDuration, 0.01), 1);
-    this.formationProgress = progress;
-    const ease = 1 - (1 - progress) * (1 - progress) * (1 - progress);
-    const activeRn = coreRadiusRatio + (1.05 - coreRadiusRatio) * ease;
-    this.activeRn = activeRn;
-    // 外围甩出：形成后段才起作用（progress²），r > 0.8R 渐强
-    const outward = outerFlowStrength * progress * progress;
+    // ---- V8 形成：progress 由外部以真实时间驱动（setFormationProgress，main.ts）。
+    // activeRn 只控制「各层粒子的出现顺序」，不再代表视觉尺寸——
+    // 真正的尺寸增长由渲染层 vortexRoot.scale 完成。----
+    const progress = this.formationProgress;
+    const activeRn = this.activeRn;
+    // 外围气流：progress > 0.72 后才渐入。
+    // 线性渐入（非平方）：形成末段（p 0.8~1.0）尽早建立足够的切向+外甩保持力，
+    // 托住外围光晕、抵消此窗口内 V7 固有的回收下潜收缩，保证外轮廓单调生长；
+    // 稳态时 ofPhase=1 与 V7 完全一致，不改变最终形态。
+    const ofPhase = Math.min(Math.max((progress - 0.72) / 0.28, 0), 1);
+    const outward = outerFlowStrength * ofPhase;
 
     for (let i = 0; i < n; i++) {
       const io = i * 3;
@@ -712,12 +738,23 @@ export class VortexFieldSimulation implements ParticleSimulation {
         az += f * pz;
       }
 
-      // 外围气流甩出：形成后段，外层粒子被旋转带着向外鼓（球形约束兜底不逃逸）
+      // 外围气流甩出（progress > 0.72 后）：切向旋转为主 + 轻微径向向外，
+      // 被主轴旋转甩出的气流感，而不是纯径向膨胀（球形约束兜底不逃逸）
       if (outward > 0 && rn > 0.8 && r > 1e-6) {
-        const f = (outward * 6 * (rn - 0.8)) / r;
-        ax += f * px;
-        ay += f * py;
-        az += f * pz;
+        let txx = this.sharedAxis[1] * pz - this.sharedAxis[2] * py;
+        let tyy = this.sharedAxis[2] * px - this.sharedAxis[0] * pz;
+        let tzz = this.sharedAxis[0] * py - this.sharedAxis[1] * px;
+        const tl = Math.hypot(txx, tyy, tzz);
+        if (tl > 1e-4 * r) {
+          const tinv = 1 / tl;
+          txx *= tinv;
+          tyy *= tinv;
+          tzz *= tinv;
+          const g = outward * 8 * (rn - 0.8);
+          ax += txx * g + (px / r) * g * 0.15;
+          ay += tyy * g + (py / r) * g * 0.15;
+          az += tzz * g + (pz / r) * g * 0.15;
+        }
       }
 
       const nvx = vx + ax * DT;

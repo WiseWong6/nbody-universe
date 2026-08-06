@@ -15,8 +15,6 @@ export interface UiCallbacks {
   onTrailChange(v: number): void;
   /** 流线宽度实时调整（无需重建） */
   onTrailWidthChange(v: number): void;
-  /** 形成时长实时调整（无需重建，写回模拟内部参数） */
-  onFormationChange(v: number): void;
   /** 颜色系统实时调整：蓝色饱和度/流线亮度/核心白半径/泛光强度（无需重建） */
   onColorLive(): void;
   /** Randomize：换一个新 seed 并重建 */
@@ -71,7 +69,7 @@ const HELP = {
   trailPersistence:
     '轨迹持续时间（0.2~3 模拟秒，默认 2.4）。\n\n100 条代表粒子的真实历史轨迹（头亮尾淡的长弧），该参数控制轨迹可见的时间长度：\n\n调大：弧线更长更完整，可环绕球体；\n调小：只剩头部短弧。\n\n与播放速度完全解耦——即使时间流速很低或暂停，长弧依然清晰。\n\n实时生效，无需重建。',
   formationDuration:
-    '形成时长（1~20 模拟秒，默认 6）。\n\n能量球从核心向外生长的总时间：\n核心先出现并旋转 → 内层循环线 → 逐层向外扩张 → 外围气流最后登场。\n\n调大：生长过程更慢更有仪式感；\n调小：更快成型。\n\n实时生效，无需重建。',
+    '形成时长（1~20 真实秒，默认 5）。\n\n能量球从核心旋转着长大的总时间：\n核心先出现并高速旋转 → 循环线随尺寸逐渐增多 → 外围气流最后登场。\n\n使用真实时间，与「时间流速」无关——timeScale 只控制内部查克拉运动速度。\n\n调大：生长过程更慢更有仪式感；\n调小：更快成型。\n\n实时生效，无需重建。',
   coreRadiusRatio:
     '初始核心大小（0.05~0.4，相对球半径，默认 0.15）。\n\n形成起点 activeRadius 的下限——t=0 时只有这个范围内的粒子与流线可见。\n\n调大：起始核更大；\n调小：从一个更小的点长出来。修改后重建。',
   trailWidth:
@@ -304,10 +302,7 @@ export class Ui {
 
     // ---- V7 形成与流线系统 ----
     this.addHelp(
-      vortexFolder
-        .add(vortexParams, 'formationDuration', 1, 20, 0.5)
-        .name('形成时长')
-        .onChange((v: number) => callbacks.onFormationChange(v)),
+      vortexFolder.add(vortexParams, 'formationDuration', 1, 20, 0.5).name('形成时长'),
       HELP.formationDuration
     );
 
