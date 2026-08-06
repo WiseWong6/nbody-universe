@@ -27,6 +27,12 @@ export interface ParticleSimulation {
   readonly particleFamily?: Uint8Array;
   /** 可选：每族稳定基础色 rgb（FAMILIES×3） */
   readonly famColors?: Float32Array;
+  /** 可选：每粒子激活半径（相对球半径，Vortex 形成生长用） */
+  readonly birthRadius?: Float32Array;
+  /** 可选：当前激活半径（相对球半径，随形成进度从核心向外扩张） */
+  readonly activeRn?: number;
+  /** 可选：形成进度 0~1（核心淡入 / 雾层延后用） */
+  readonly formationProgress?: number;
 
   /** 按当前参数（重新）生成初始状态 */
   init(): void;

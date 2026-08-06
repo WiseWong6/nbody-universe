@@ -78,6 +78,8 @@ const canvas = document.getElementById('scene') as HTMLCanvasElement;
 const renderer = new Renderer(canvas, params.bloom);
 
 let sim: ParticleSimulation;
+/** vortex 引擎时指向具体模拟实例（形成时长等实时参数写回用） */
+let vortexSim: VortexFieldSimulation | null = null;
 let stars: StarField;
 let coreGlow: CoreGlow | null = null;
 let glowPlane: GlowPlane | null = null;
@@ -88,6 +90,10 @@ let trails: TrailRenderer | null = null;
 /** URL ?paused=1：加载即暂停（验收截图用） */
 const urlPaused = urlParams.get('paused') === '1';
 if (urlPaused) params.paused = true;
+
+/** URL ?ts=：覆盖 vortex 播放速度（验收截图定格形成阶段用，如 ?ts=1 实时） */
+const urlTs = Number(urlParams.get('ts'));
+if (Number.isFinite(urlTs) && urlTs >= 0) vortexParams.timeScale = urlTs;
 
 function regenerate(): void {
   // 释放旧资源
@@ -148,16 +154,21 @@ function regenerate(): void {
       renderer.controls.enabled = true;
     }
   } else {
-    sim = new VortexFieldSimulation(vortexParams);
+    vortexSim = new VortexFieldSimulation(vortexParams);
+    sim = vortexSim;
     // 粒子是辅助层：boost 1.0 弱化噪点感，主视觉交给流线；
     // dynamicColor：颜色每物理步按半径刷新（外蓝内白）
     stars = createStarField(sim, renderer.pixelRatio, { speedRef: 12.0, boost: 1.0, brightMaxLum: 1.6, dynamicColor: true });
     haze = createEnergyHaze(vortexParams.radius);
     vortexCore = createVortexCore(vortexParams.radius);
-    trails = createTrailRenderer(sim);
+    trails = createTrailRenderer(sim, {
+      density: vortexParams.trailDensity,
+      width: vortexParams.trailWidth,
+    });
     trails.setPersistence(vortexParams.trailPersistence);
     trails.setBrightness(vortexParams.trailBrightness);
     trails.setSaturation(vortexParams.blueSaturation);
+    trails.setWidth(vortexParams.trailWidth);
     trails.setResolution(window.innerWidth, window.innerHeight);
     vortexCore.setWhiteRadius(vortexParams.coreWhiteRadius);
     // ?layers= 调试图层隔离：trails / points / none
@@ -175,16 +186,16 @@ function regenerate(): void {
       renderer.scene.add(trails.object);
     }
 
-    // 预热：快进 240 步（4 模拟秒）并记录满 96 格历史——
-    // 压缩流充分发展（部分粒子已潜入核心并回收），首帧即有完整向心螺旋长弧
-    for (let i = 0; i < 240; i++) {
-      sim.update(1 / 60);
-      trails.sync(sim.time);
-    }
+    // V7：不做预热快进——能量球从核心开始真实生长，首帧只看到核心。
+    // 形成进度的初始 uniform 同步（暂停/首帧也正确）
     sim.syncSpeed();
     stars.sync(sim.time);
+    stars.setActiveRn(sim.activeRn ?? 1e9);
+    trails.sync(sim.time, sim.activeRn ?? 1e9);
     haze.sync(sim.time);
+    haze.setFormation(sim.formationProgress ?? 1);
     vortexCore.sync(sim.time);
+    vortexCore.setFormation(sim.formationProgress ?? 1);
 
     const azim = Number.isFinite(urlAzim) ? urlAzim : 28;
     renderer.frameVortexCamera(vortexParams.radius, azim);
@@ -215,6 +226,11 @@ const ui = new Ui(params, vortexParams, engine, {
   onBloomToggle: (v) => renderer.setBloom(v),
   onHudToggle: (v) => ui.setHudVisible(v),
   onTrailChange: (v) => trails?.setPersistence(v),
+  onTrailWidthChange: (v) => trails?.setWidth(v),
+  // 形成时长实时生效：直接写回模拟内部的参数副本（step 每步读取）
+  onFormationChange: (v) => {
+    if (vortexSim) vortexSim.params.formationDuration = v;
+  },
   // 颜色系统四项实时调整（无需重建）：饱和度 / 流线亮度 / 核心白半径 / 泛光强度
   onColorLive: () => {
     trails?.setSaturation(vortexParams.blueSaturation);
@@ -256,9 +272,13 @@ function tick(now: number): void {
     stars.sync(sim.time);
     coreGlow?.sync(sim.time);
     // 流线跟随模拟时间记录：Time Scale 降低时弧线长度不变，暂停时冻结
-    trails?.sync(sim.time);
+    trails?.sync(sim.time, sim.activeRn ?? 1e9);
     haze?.sync(sim.time);
     vortexCore?.sync(sim.time);
+    // V7 形成生长：激活半径与形成进度驱动各层显隐
+    stars.setActiveRn(sim.activeRn ?? 1e9);
+    haze?.setFormation(sim.formationProgress ?? 1);
+    vortexCore?.setFormation(sim.formationProgress ?? 1);
   }
 
   renderer.render();

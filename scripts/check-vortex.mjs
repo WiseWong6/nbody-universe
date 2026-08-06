@@ -5,11 +5,31 @@ const base = {
   radius: 24, swirl: 0.85, compression: 0.7, axisMix: 0.62, turbulence: 0.1,
   confinement: 1.1, drag: 0.1, trailPersistence: 2.4, timeScale: 0.22,
   blueSaturation: 1.4, coreWhiteRadius: 0.1, trailBrightness: 1.0, bloomStrength: 0.38,
+  formationDuration: 6, coreRadiusRatio: 0.15, trailWidth: 1.3, trailDensity: 140,
+  outerFlowStrength: 0.6,
   particleCount: 15000, seed: 42,
 };
 
 const sim = new VortexFieldSimulation(base);
 const R = base.radius;
+
+// ---- V7 形成生长断言：activeRadius 从核心向外扩张，激活比例单调增长 ----
+function activeRatio() {
+  let act = 0;
+  for (let i = 0; i < sim.count; i++) if (sim.birthRadius[i] <= sim.activeRn) act++;
+  return act / sim.count;
+}
+const ar0 = activeRatio();
+for (let f = 0; f < 3 * 60; f++) sim.update(1 / 60); // 3 模拟秒（形成 50%）
+const arMid = activeRatio();
+const activeRnMid = sim.activeRn;
+for (let f = 0; f < 4 * 60; f++) sim.update(1 / 60); // 累计 7 模拟秒 > formationDuration
+const arFull = activeRatio();
+console.log(`formation: t=0 激活=${(100 * ar0).toFixed(1)}% activeRn=${base.coreRadiusRatio} | t=3s 激活=${(100 * arMid).toFixed(1)}% activeRn=${activeRnMid.toFixed(2)} | t=7s 激活=${(100 * arFull).toFixed(1)}%`);
+console.log(`formation 断言: t0<25%=${ar0 < 0.25 ? 'PASS' : 'FAIL'} 中段增长=${arMid > ar0 + 0.2 ? 'PASS' : 'FAIL'} 完成≈100%=${arFull > 0.99 ? 'PASS' : 'FAIL'}`);
+
+// 回到 t=0 重新计时跑稳定性（init 重置形成进度）
+sim.init();
 
 function stats(label) {
   let nan = 0, outside = 0, farOut = 0, center = 0, rSum = 0, vSum = 0;

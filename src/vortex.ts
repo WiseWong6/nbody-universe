@@ -3,10 +3,18 @@ import type { VortexParams } from './types';
 import type { ParticleSimulation } from './simulation-interface';
 
 /**
- * VortexFieldSimulation —— 三维旋涡能量球（Visual V3：向心压缩查克拉流模型）。
+ * VortexFieldSimulation —— 三维旋涡能量球（Visual V7：从中心生长的螺旋丸模型）。
  *
  * 不再是球壳轨道绕圈：Flow 粒子持续向球心流动，流动过程中被所属
  * Orbit Family 的局部旋转轴偏折，形成不规则交错、越近中心越快的螺旋流。
+ *
+ * V7 形成逻辑（formation）：能量球不是一次出现，而是从核心向外生长——
+ *   progress   = clamp(time / formationDuration, 0, 1)
+ *   activeRn   = mix(coreRadiusRatio, 1.05, easeOutCubic(progress))
+ * 每个粒子带激活半径 birthRn（Core 组最小、Flow 组=初始壳层、Edge Sparks 最大），
+ * 只有 birthRn <= activeRn 的粒子参与积分与着色：核心先转，内层循环线先出现，
+ * 外层逐步加入，Edge Sparks 外围气流最后登场。形成后段外层粒子获得
+ * outerFlowStrength 径向甩出分量（被旋转甩出的气流感），球形约束兜底不逃逸。
  *
  * 每步目标速度：
  *   target = inwardCompression + irregularSwirl + turbulence
@@ -56,6 +64,13 @@ export class VortexFieldSimulation implements ParticleSimulation {
 
   time = 0;
   stepCount = 0;
+
+  /** 每粒子激活半径（相对球半径 R）：birthRn <= activeRn 才参与运动与着色 */
+  birthRadius = new Float32Array(0);
+  /** 当前激活半径（相对 R）：从 coreRadiusRatio 向 1.05 生长 */
+  activeRn = 0;
+  /** 形成进度 0~1（渲染层核心淡入 / 雾层延后用） */
+  formationProgress = 0;
 
   private rng: Rng = createRng(1);
   private accumulator = 0;
@@ -108,6 +123,8 @@ export class VortexFieldSimulation implements ParticleSimulation {
     this.stepCount = 0;
     this.time = 0;
     this.precessAngle = 0;
+    this.formationProgress = 0;
+    this.activeRn = this.params.coreRadiusRatio;
     this.buildFamilies();
     this.buildCurlGrid();
     this.buildParticles();
@@ -192,8 +209,8 @@ export class VortexFieldSimulation implements ParticleSimulation {
         [0.231, 0.722, 1.0], // #3BB8FF 主体亮蓝
         [0.455, 0.898, 1.0], // #74E5FF 青蓝（少量）
       ];
-      // 15 族的固定色票配额：深蓝×4 + 电光蓝×4 + 主体蓝×6 + 青蓝×1
-      const tickets = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3];
+      // 15 族的固定色票配额：深蓝×3 + 电光蓝×4 + 主体蓝×7 + 青蓝×1（V7：主体蓝占比提高，更通透）
+      const tickets = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3];
       for (let i = tickets.length - 1; i > 0; i--) {
         const j = Math.floor(rng.next() * (i + 1));
         const tmp = tickets[i];
@@ -384,6 +401,7 @@ export class VortexFieldSimulation implements ParticleSimulation {
     this.family = new Uint8Array(n);
     this.group = new Uint8Array(n);
     this.colorJit = new Float32Array(n);
+    this.birthRadius = new Float32Array(n);
 
     // 分组标记：Edge Sparks + 高速 Flow 亮点走高亮层
     const isBright = new Int8Array(n);
@@ -420,6 +438,8 @@ export class VortexFieldSimulation implements ParticleSimulation {
         this.position[io] = dx * r;
         this.position[io + 1] = dy * r;
         this.position[io + 2] = dz * r;
+        // 激活半径 = 初始壳层：activeRadius 扩张到该层时这条查克拉流才加入
+        this.birthRadius[i] = r / R;
 
         // 尺寸 1.0~1.9px（粒子是辅助，不是主视觉）；约 4% 亮点走高亮层
         if (rng.next() < 0.04) {
@@ -444,6 +464,8 @@ export class VortexFieldSimulation implements ParticleSimulation {
         this.position[io] = dx * r;
         this.position[io + 1] = dy * r;
         this.position[io + 2] = dz * r;
+        // 核心粒子最先激活（0~0.2R）
+        this.birthRadius[i] = rng.next() * 0.2;
         this.starSize[i] = rng.range(1.2, 2.0);
       } else {
         // ---- 3% Edge Sparks：外缘高速碎光（高亮层，数量克制）----
@@ -461,6 +483,8 @@ export class VortexFieldSimulation implements ParticleSimulation {
         this.position[io] = dx * r;
         this.position[io + 1] = dy * r;
         this.position[io + 2] = dz * r;
+        // 外围碎光最后激活（0.85~1.0R）：形成收尾才出现气流边缘
+        this.birthRadius[i] = 0.85 + rng.next() * 0.15;
         isBright[i] = 1;
         this.starSize[i] = rng.range(0.8, 1.5);
       }
@@ -479,6 +503,7 @@ export class VortexFieldSimulation implements ParticleSimulation {
       this.velocity[io + 2] = tv[2] + rng.gauss() * 0.4;
 
       // 颜色：族稳定基础色 × 半径亮度 × 固定亮度抖动（每步随半径刷新亮度，见 step）
+      // 未激活粒子（birthRn > activeRn）颜色置 0：Additive 层不可见
       const rn = Math.hypot(
         this.position[io],
         this.position[io + 1],
@@ -486,7 +511,13 @@ export class VortexFieldSimulation implements ParticleSimulation {
       ) / R;
       const f = 0.85 + rng.next() * 0.3;
       this.colorJit[i] = f;
-      this.applyColor(this.family[i], this.group[i], rn, f, this.color, io);
+      if (this.birthRadius[i] <= this.activeRn) {
+        this.applyColor(this.family[i], this.group[i], rn, f, this.color, io);
+      } else {
+        this.color[io] = 0;
+        this.color[io + 1] = 0;
+        this.color[io + 2] = 0;
+      }
 
       // 闪烁：4% 粒子，克制
       if (rng.next() < 0.04) {
@@ -511,6 +542,7 @@ export class VortexFieldSimulation implements ParticleSimulation {
     this.permuteFamily(order);
     this.permuteGroup(this.group, order);
     this.permute1(this.colorJit, order);
+    this.permute1(this.birthRadius, order);
 
     this.syncSpeed();
   }
@@ -619,14 +651,33 @@ export class VortexFieldSimulation implements ParticleSimulation {
   }
 
   step(): void {
-    const { confinement, drag, radius: R } = this.params;
+    const { confinement, drag, radius: R, formationDuration, coreRadiusRatio, outerFlowStrength } =
+      this.params;
     const n = this.count;
-    const { position, velocity, family } = this;
+    const { position, velocity, family, birthRadius } = this;
 
     this.precessAxes();
 
+    // ---- V7 形成生长：activeRadius 从核心向外扩张（easeOutCubic）----
+    const progress = Math.min(this.time / Math.max(formationDuration, 0.01), 1);
+    this.formationProgress = progress;
+    const ease = 1 - (1 - progress) * (1 - progress) * (1 - progress);
+    const activeRn = coreRadiusRatio + (1.05 - coreRadiusRatio) * ease;
+    this.activeRn = activeRn;
+    // 外围甩出：形成后段才起作用（progress²），r > 0.8R 渐强
+    const outward = outerFlowStrength * progress * progress;
+
     for (let i = 0; i < n; i++) {
       const io = i * 3;
+
+      // 未激活粒子：尚未长到这一层，不积分、不着色（保持不可见）
+      if (birthRadius[i] > activeRn) {
+        this.color[io] = 0;
+        this.color[io + 1] = 0;
+        this.color[io + 2] = 0;
+        continue;
+      }
+
       const px = position[io];
       const py = position[io + 1];
       const pz = position[io + 2];
@@ -656,6 +707,14 @@ export class VortexFieldSimulation implements ParticleSimulation {
       } else if (rn < 0.12 && r > 1e-6) {
         // 中心轻微向外，防坍缩
         const f = (confinement * 6 * (0.12 - rn)) / (0.12 * r);
+        ax += f * px;
+        ay += f * py;
+        az += f * pz;
+      }
+
+      // 外围气流甩出：形成后段，外层粒子被旋转带着向外鼓（球形约束兜底不逃逸）
+      if (outward > 0 && rn > 0.8 && r > 1e-6) {
+        const f = (outward * 6 * (rn - 0.8)) / r;
         ax += f * px;
         ay += f * py;
         az += f * pz;

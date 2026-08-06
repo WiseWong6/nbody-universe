@@ -29,6 +29,16 @@ export interface VortexParams {
   trailBrightness: number;
   /** Bloom 泛光强度（实时生效） */
   bloomStrength: number;
+  /** 形成时长（模拟秒）：从核心到完整能量球的生长时间 */
+  formationDuration: number;
+  /** 初始核心大小（相对球半径 R）：形成起点 activeRadius 的下限 */
+  coreRadiusRatio: number;
+  /** 流线宽度基准（px，中层主线；内层高亮 ×1.3，外层气流 ×0.6） */
+  trailWidth: number;
+  /** 流线数量基准（总条数，按 内层/中层/外层 分组拆分） */
+  trailDensity: number;
+  /** 外围气流强度：形成后段外层粒子的径向甩出分量 */
+  outerFlowStrength: number;
   particleCount: number;
   seed: number;
 }
@@ -47,6 +57,11 @@ export const DEFAULT_VORTEX: Omit<VortexParams, 'particleCount' | 'seed'> = {
   coreWhiteRadius: 0.1,
   trailBrightness: 1.0,
   bloomStrength: 0.38,
+  formationDuration: 6,
+  coreRadiusRatio: 0.15,
+  trailWidth: 1.3,
+  trailDensity: 140,
+  outerFlowStrength: 0.6,
 };
 
 /** 用户可调参数（面板可见） */

@@ -104,7 +104,7 @@ export class Renderer {
    * azimDeg=90 时给出正侧面视角（验收截图用）。
    */
   frameVortexCamera(radius: number, azimDeg = 28): void {
-    const dist = radius * 2.0;
+    const dist = radius * 1.75;
     const elev = (12 * Math.PI) / 180;
     const azim = (azimDeg * Math.PI) / 180;
     this.camera.position.set(

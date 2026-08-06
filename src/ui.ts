@@ -13,6 +13,10 @@ export interface UiCallbacks {
   onEngineChange(engine: EngineName): void;
   /** 流线长度实时调整（无需重建） */
   onTrailChange(v: number): void;
+  /** 流线宽度实时调整（无需重建） */
+  onTrailWidthChange(v: number): void;
+  /** 形成时长实时调整（无需重建，写回模拟内部参数） */
+  onFormationChange(v: number): void;
   /** 颜色系统实时调整：蓝色饱和度/流线亮度/核心白半径/泛光强度（无需重建） */
   onColorLive(): void;
   /** Randomize：换一个新 seed 并重建 */
@@ -66,6 +70,16 @@ const HELP = {
     '阻尼系数（0~1），与速度成正比的减速力。\n\n调大：流动更快趋于平稳、能量感下降；\n调小：流动更自由持久。\n\n与湍流、约束力共同决定稳态下的运动烈度。修改后重建。',
   trailPersistence:
     '轨迹持续时间（0.2~3 模拟秒，默认 2.4）。\n\n100 条代表粒子的真实历史轨迹（头亮尾淡的长弧），该参数控制轨迹可见的时间长度：\n\n调大：弧线更长更完整，可环绕球体；\n调小：只剩头部短弧。\n\n与播放速度完全解耦——即使时间流速很低或暂停，长弧依然清晰。\n\n实时生效，无需重建。',
+  formationDuration:
+    '形成时长（1~20 模拟秒，默认 6）。\n\n能量球从核心向外生长的总时间：\n核心先出现并旋转 → 内层循环线 → 逐层向外扩张 → 外围气流最后登场。\n\n调大：生长过程更慢更有仪式感；\n调小：更快成型。\n\n实时生效，无需重建。',
+  coreRadiusRatio:
+    '初始核心大小（0.05~0.4，相对球半径，默认 0.15）。\n\n形成起点 activeRadius 的下限——t=0 时只有这个范围内的粒子与流线可见。\n\n调大：起始核更大；\n调小：从一个更小的点长出来。修改后重建。',
+  trailWidth:
+    '流线宽度基准（0.5~3 px，默认 1.3）。\n\n中层主线的线宽；内层高亮线 ×1.3，外层气流线 ×0.6。\n\n调大：能量流更粗更有力量感；\n调小：更纤细通透。\n\n实时生效，无需重建。',
+  trailDensity:
+    '流线密度（60~300 条，默认 140）。\n\n按 12% / 60% / 28% 分到 内层高亮 / 中层主线 / 外层气流 三层。\n\n调大：循环线更密集饱满；\n调小：更疏朗留白。修改后重建。',
+  outerFlowStrength:
+    '外围气流强度（0~2，默认 0.6）。\n\n形成后段（progress² 渐入），外层粒子被旋转带着向外鼓出的径向分量——\n「被甩出来」的气流感，球形约束兜底不会逃逸。\n\n调大：外围气流更张扬；\n0 = 无甩出，纯向心压缩。修改后重建。',
   blueSaturation:
     '蓝色饱和度（0~2.5，默认 1.4）。\n\n围绕亮度轴缩放流线与粒子的色相纯度：\n\n调大：蓝色更纯更艳（电光蓝更"电"）；\n调小：趋向灰蓝；\n0 = 灰度。\n\n只改色相纯度，不改明暗。有饱和度钳制兜底——任何值都不会漂出白色。实时生效，无需重建。',
   coreWhiteRadius:
@@ -286,6 +300,47 @@ export class Ui {
         .name('轨迹持续')
         .onChange((v: number) => callbacks.onTrailChange(v)),
       HELP.trailPersistence
+    );
+
+    // ---- V7 形成与流线系统 ----
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'formationDuration', 1, 20, 0.5)
+        .name('形成时长')
+        .onChange((v: number) => callbacks.onFormationChange(v)),
+      HELP.formationDuration
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'coreRadiusRatio', 0.05, 0.4, 0.01)
+        .name('初始核心大小')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.coreRadiusRatio
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'trailWidth', 0.5, 3, 0.05)
+        .name('流线宽度')
+        .onChange((v: number) => callbacks.onTrailWidthChange(v)),
+      HELP.trailWidth
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'trailDensity', 60, 300, 5)
+        .name('流线密度')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.trailDensity
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'outerFlowStrength', 0, 2, 0.05)
+        .name('外围气流强度')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.outerFlowStrength
     );
 
     // ---- 颜色系统（实时生效，无需重建）----
