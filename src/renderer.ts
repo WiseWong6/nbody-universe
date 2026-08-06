@@ -100,11 +100,11 @@ export class Renderer {
 
   /**
    * Vortex Energy 取景：正面略俯视（12°）能量球，球体占画面高约 64%。
-   * V6 体积球在 1.0R 处仍然可见，距离放到 2.4R 保持构图饱满且留白充足。
+   * 压缩模型下可见结构集中在 ~0.6R 内，距离收到 2.2R 保持构图饱满。
    * azimDeg=90 时给出正侧面视角（验收截图用）。
    */
   frameVortexCamera(radius: number, azimDeg = 28): void {
-    const dist = radius * 2.4;
+    const dist = radius * 2.0;
     const elev = (12 * Math.PI) / 180;
     const azim = (azimDeg * Math.PI) / 180;
     this.camera.position.set(

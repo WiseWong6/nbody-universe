@@ -5,8 +5,6 @@ const base = {
   radius: 24, swirl: 0.85, compression: 0.7, axisMix: 0.62, turbulence: 0.1,
   confinement: 1.1, drag: 0.1, trailPersistence: 2.4, timeScale: 0.22,
   blueSaturation: 1.4, coreWhiteRadius: 0.1, trailBrightness: 1.0, bloomStrength: 0.38,
-  coreSpin: 1.2, propagationDelay: 0, trailDensity: 36, trailWidth: 0.9, flowScrollSpeed: 0.8,
-  formationDuration: 2.5, outerSpin: 0.35, volumeDensity: 1.1, ribbonAmount: 36,
   particleCount: 15000, seed: 42,
 };
 

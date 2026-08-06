@@ -29,27 +29,6 @@ export interface VortexParams {
   trailBrightness: number;
   /** Bloom 泛光强度（实时生效） */
   bloomStrength: number;
-  /** 核心旋转强度：旋转径向衰减指数 α = 0.5·(0.5+0.5·coreSpin)，越大核心旋转主导性越强（实时生效） */
-  coreSpin: number;
-  /** 旋转传播延迟（秒）：t_eff = t − propagationDelay·(r/R)，中心先转、外层后跟（实时生效）。
-   * V6 起仅作内部保留（Formation 由体积 Shader 的径向显现遮罩负责），默认 0 */
-  propagationDelay: number;
-  /** 主轨迹数量（180~260，重建流线层生效）。
-   * V6 起由 ribbonAmount 取代（辅助能量丝 24~48 条），仅作内部保留 */
-  trailDensity: number;
-  /** 主轨迹宽度 px（1~3，实时生效） */
-  trailWidth: number;
-  /** 亮纹沿轨迹滚动速度（0~3，实时生效） */
-  flowScrollSpeed: number;
-  // ---- V6 Chakra Volume ----
-  /** 形成动画时长（模拟秒）：核心先亮 → 能量体径向扩张到外缘 */
-  formationDuration: number;
-  /** 体积纹理外层旋转速度（rad/s），内层由 coreSpin 决定且必须更快 */
-  outerSpin: number;
-  /** 体积密度倍率（Raymarch 能量体浓度） */
-  volumeDensity: number;
-  /** 辅助能量丝数量（24~48，重建流线层生效） */
-  ribbonAmount: number;
   particleCount: number;
   seed: number;
 }
@@ -62,21 +41,12 @@ export const DEFAULT_VORTEX: Omit<VortexParams, 'particleCount' | 'seed'> = {
   turbulence: 0.1,
   confinement: 1.1,
   drag: 0.1,
-  trailPersistence: 1.5,
+  trailPersistence: 2.4,
   timeScale: 0.22,
   blueSaturation: 1.4,
   coreWhiteRadius: 0.1,
-  trailBrightness: 0.7,
+  trailBrightness: 1.0,
   bloomStrength: 0.38,
-  coreSpin: 1.2,
-  propagationDelay: 0,
-  trailDensity: 36,
-  trailWidth: 0.9,
-  flowScrollSpeed: 0.8,
-  formationDuration: 2.5,
-  outerSpin: 0.35,
-  volumeDensity: 1.1,
-  ribbonAmount: 36,
 };
 
 /** 用户可调参数（面板可见） */

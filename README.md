@@ -3,18 +3,14 @@
 由发光粒子组成的三维宇宙模拟原型：受限 N-body 引力 + GLSL 粒子渲染。
 本阶段只做宇宙模拟，不含照片上传、音频、登录、数据库与分享。
 
-**Vortex Energy 分支（Visual V6：Chakra Volume）**：**旋涡能量球引擎**（默认）——
-主视觉改为**球体 Raymarch 体积 Shader**（`src/chakraVolume.ts`）：
-3D fBm + domain warping 能量纹理 × 径向剖面（中心密、外缘破碎）
-× Formation 径向显现遮罩（中心先形成、能量体再向外扩张），
-两个不同轴向/速度的旋转域 + 静态螺旋扭转 + 径向向内滚动，
-构成连续通透的蓝白查克拉能量体（螺旋丸式效果原型）。
-36 条 Catmull-Rom 平滑的细能量丝与 5000 粒边缘碎光只作辅助（≤5% 视觉），
-V5 的 220 条 LineSegments2 历史轨迹主视觉已废弃（铁丝团/原子轨道感）。
+**Vortex Energy 分支（Visual V3）**：**旋涡能量球引擎**（默认）——
+查克拉压缩流模型：向心压缩 + 15 族不规则局部旋向（越近中心角速度越大）
++ Curl Noise 微扰，能量从外缘持续流向中心聚核（螺旋丸式效果原型），
+100 条真实历史轨迹流线为视觉主体。
 与 N-body 银河共用统一 `ParticleSimulation` 接口、渲染管线与面板，
 面板顶部「引擎」下拉或 URL `?engine=galaxy|vortex` 切换。
-截图见 `shots/v6-form-early.png`（核心先出现）、`shots/v6-form-mid.png`
-（向外扩张）、`shots/v6-form-done.png`（形成完成）、`shots/v6-steady.png`（稳态）。
+截图见 `shots/v3-paused.png`（默认暂停）、`shots/v3-run5s.png`（运行 5s）、
+`shots/v3-side.png`（侧面）与 `shots/v3-compare.png`（V2/V3 对比）。
 
 **Visual V3**：银河引擎默认进入 **Art Preview 静态预览模式**——物理暂停、镜头固定，
 三渲染层（银河光雾面片 + 微小恒星 + 1% 高亮恒星）+ 暗尘带 + 重制核心，
@@ -59,89 +55,92 @@ URL 参数：
 不关心背后是引力还是力场。`update` 内部用固定步长 accumulator 切分，
 保证确定性与帧率无关。
 
-## Vortex Energy（旋涡能量球，Visual V6：Chakra Volume）
+## Vortex Energy（旋涡能量球，Visual V3）
 
-**两个独立过程**：
-
-1. **Formation（形成动画，纯 Shader 视觉）**：`progress = clamp(t/formationDuration, 0, 1)`，
-   径向显现遮罩 `reveal = 1 − smoothstep(progress−feather, progress, r/R)`——
-   0~20% 中心先出现并旋转，20%~100% 能量体从中心扩张到外缘，之后稳态。
-   不再用传播延迟拖慢粒子启动来模拟形成（V5 做法已废弃）。
-2. **Steady Flow（稳态查克拉流，粒子物理）**：外层能量持续向内压缩、
-   越近中心旋转越快，球体整体稳定（回收重生维持，不坍缩不逃逸）。
-
-**粒子稳态流模型**（`src/vortex.ts`，无引力、无粒子间作用）：
+**查克拉压缩流模型**（`src/vortex.ts`，无引力、无粒子间作用）：
+V2 的「球壳轨道绕圈」（plane/radial 修正把粒子钉在固定轨道面上）已废弃，
+改为**向心压缩 + 不规则局部旋转偏折**——能量从外缘持续流向中心、
+越近中心旋转越快，形成高旋转密度的聚核球：
 
 ```
-targetVelocity = inwardCompression + irregularSwirl + spiralInflow + turbulence
+targetVelocity = inwardCompression + irregularSwirl + turbulence
 
-inwardCompression = -normalize(p) · compression · 0.08R · smoothstep(0.10, 0.45, r/R)
-irregularSwirl    = tangent[g] · swirl · 11 · ((R+ε)/(r+ε))^α · famSpeedMul[g]
+inwardCompression = -normalize(p) · compression · 0.32R · smoothstep(0.10, 0.45, r/R)
+irregularSwirl    = tangent[g] · swirl · 7.5 · ((R+ε)/(r+ε))^0.5 · famSpeedMul[g]
                     tangent[g] = normalize(axis[g] × p)，ε = 0.12R
-                    α = 0.5·(0.5+0.5·coreSpin)（coreSpin 越大核心旋转主导越强）
-spiralInflow      = -r̂_in · |vTan| · 0.12  （轨道面内向内分量，大圆轨道→卷入核心的螺旋）
 turbulence        = curlNoise · turbulence · 4   （只占 5%~12% 局部扰动）
 accel             = follow·(target − v) − drag·v
 ```
 
-- **螺旋拓扑**：切向:径向 ≈ 3.5:1——粒子沿绕核心卷入的长弧螺旋运动。
-- **径向加速旋转**：角速度 ∝ 1/(r+ε)^α——外围慢、核心快。
-- 15 个 Orbit Family 提供 seed 确定的局部旋向（不规则交错）。
-- **回收重生**：流入核心（r < 0.12R）的 Flow 粒子确定性重生到外缘——
-  60s 无头验证：逃逸率 0%、中心堆积 0%、确定性 PASS。
+- **向心压缩**：所有 Flow 粒子有明确的向心速度项（0.45R 以外满强度，
+  向内平滑衰减），整体趋势是「向中心收缩」而非球面绕行。
+- **径向加速旋转**：角速度 ∝ 1/(r+ε)^0.5——外围查克拉流慢，
+  向内流动过程中角速度持续增大，核心处旋转密度最高
+  （inward acceleration + angular acceleration）。
+- 15 个 Orbit Family 只提供 seed 确定的**局部旋向**（独立旋转轴 +
+  0.008~0.02 rad/s 极慢进动），不再绑定固定轨道半径；
+  不同粒子群旋转方向不规则交错（Axis Mix 控制离散程度）。
+- **回收重生**：流入核心（r < 0.12R）的 Flow 粒子由 seed 确定性
+  重生到外缘 0.88~1.0R——维持持续的压缩流，不坍缩成奇点也不逃逸
+  （`scripts/check-vortex.mjs`：60s 后逃逸率 0%、中心堆积 0%、确定性 PASS）。
 - 积分：固定步长 1/60s 半隐式 Euler，全程 seeded（mulberry32）。
 
-**Chakra Volume（V6 主视觉，`src/chakraVolume.ts`）**：
-FrontSide 球面提供进入点，26 步 Raymarch 前向累积（jitter 消条带）。
-密度 = 3D fBm（3 倍频，避免亚像素沙化）+ domain warping
-× 径向剖面（核心高斯 + 主体 + 外缘破碎）× Formation 显现遮罩。
-采样坐标按半径旋转 + 剪切：
+**粒子分组**：85% Flow（全体积 0.12~1.0R cbrt 分布，1.0~1.9px）/
+12% Shell / 3% Core。粒子每步按当前半径动态上色（外蓝内白 +
+饱和度钳制：rn > 0.15 时 G ≤ 0.36B、R ≤ 0.22B，白色只允许出现在核心）。
 
-```
-omega(r) = mix(coreSpeed, outerSpeed, pow(r/R, 0.7))   核心快、外围慢
-两个旋转域：axisA·(+omega·t + twist) / axisB·(−0.62·omega·t − 0.7·twist)
-twist = 1.35/(r/R + 0.25)  静态螺旋扭转（噪声剪成围绕核心的旋涡条纹）
-scroll：采样半径随时间增大 → 纹理向核心滚动
-```
+**渲染分层**（`src/particles.ts`）：
 
-颜色严格按层级：核心 `#F7FEFF`（只在 rn<0.07）→ 内层 `#A8F3FF` →
-主体 `#3BB8FF` → 外层 `#0A67FF` → 暗部 `#001B5A`；白色只属于小型核心
-与极少数密度峰值高亮。累积亮度 ×0.78 钳制 + alpha 上限 0.92——
-保持通透层次与蓝色色相，中心不洗白。SRGBColorSpace +
-ACESFilmicToneMapping（exposure 0.9），Bloom 克制档（0.38/0.3/0.75）。
+1. **Main Chakra Trails（视觉主体）**：`createTrailRenderer` 挑选
+   100 个 Flow 代表粒子，每个保存 96 格 60Hz 历史位置（环形缓冲，
+   **跟随 sim.time 采样**，与 wall-clock 解耦），LineSegments2 fat lines
+   （linewidth 4.2px）绘制。颜色由每段历史点半径驱动：尾（外/旧）
+   深蓝 → 头（内/新）亮蓝白，中段经亮度衰减（min(rn/0.75,1)）
+   与饱和度钳制防止 additive 堆白；回收重生跳变时单条轨迹清零，
+   不画横跨球体的直线。是唯一参与明显 Bloom 的层。
+   Trail Persistence 只控制可见段数，与物理速度完全解耦。
+2. **Spark Particles**：15000 辅助粒子（NormalBlending 普通层 +
+   尾部高亮 Additive 层），只作碎光填充，不再是主视觉。
+3. **Core Compression**：`createVortexCore` 压缩高斯 billboard（0.5R，
+   alpha 0.3）+ 随时间旋动的径向拉伸噪声纹理——亮而有内部层次，
+   不成纯白圆洞。
+4. **Inner Energy Volume**：`createEnergyHaze` BackSide 体积雾
+   （视角中心亮/边缘暗 + 双层 fBm 随时间反向漂移，峰值 alpha 0.05，
+   噪声阈值制造局部缺口）——表现查克拉浓度与体积感，不是玻璃壳。
 
-**辅助层**：
+**配色（V4 颜色系统：色相与运动半径解绑）**：
+每个 Orbit Family 在 init 时按固定配额分配**稳定基础色**（seed 洗牌：
+深蓝 `#075CFF`×4 + 电光蓝 `#0A67FF`×4 + 主体蓝 `#3BB8FF`×6 + 青蓝 `#74E5FF`×1，
+≈53% 深蓝/电光蓝、40% 主体蓝、7% 青蓝），运动全程不变；
+半径只控制亮度（内层投影密度高，亮度随密度反压，防止 additive 堆白），
+并有饱和度钳制（G ≤ 0.62B、R ≤ 0.42B）兜底——任何参数组合都不会漂出白色。
+流线头部可以更亮，但永远是蓝；**白色只属于独立的 Core Compression 核心层**：
+billboard 上 0.025R 内的小亮点（`uWhiteRadius` 控制），之外立刻消失，
+蓝色翼区 alpha≈0。粒子与流线不承担制造白色的职责。
+SRGBColorSpace + ACESFilmicToneMapping，exposure 0.9，
+Bloom 克制档（strength 0.38 / radius 0.3 / threshold 0.75）——
+阈值只拾取最亮的流线头部与核心点，保留蓝色色相，不把高亮蓝漂成纯白。
+Trail Opacity 0.65。
 
-- **能量丝**：36 条（Ribbon Amount 0~64）代表粒子历史轨迹，
-  LineSegments2 细线 0.9px、opacity 0.4（低于体积主体），
-  每个历史间隔输出 2 段（Catmull-Rom 中点平滑，禁止折角），
-  只显示短弧与局部能量丝，不勾勒球壳。
-- **边缘碎光**：5000 粒子（移动 3000），boost 0.35，视觉 ≤5%。
-- **Core Compression**：`createVortexCore` 小型白色核心亮点，不成纯白圆洞。
-
-### Vortex 参数（面板「旋涡参数」组，V6 精简为 8 + 1）
+### Vortex 参数（面板「旋涡参数」组）
 
 | 参数 | 含义 |
 | --- | --- |
-| Formation Duration | 形成时长（0.5~6 模拟秒），默认 2.5；中心先亮→向外扩张的节奏，实时生效 |
-| Core Spin | 核心旋转（0~3），默认 1.2；体积内层角速度 + 粒子旋转径向指数，实时生效 |
-| Outer Spin | 外层旋转（0~2 rad/s），默认 0.35；omega(r)=mix(core,outer,(r/R)^0.7)，实时生效 |
-| Compression | 压缩强度（0~2），默认 0.7；向心流速倍率，实时生效 |
-| Volume Density | 体积密度（0~2.5），默认 1.1；Raymarch 能量体浓度，实时生效 |
-| Turbulence | 湍流（0~2），默认 0.1；粒子 Curl Noise + 体积 domain warp 幅度，实时生效 |
-| Ribbon Amount | 能量丝数量（0~64），默认 36；只重建能量丝层 |
-| Bloom Strength | 泛光强度（0~1.2），默认 0.38；阈值 0.75 保留蓝色色相，实时生效 |
+| Radius | 球体半径（5~60），默认 24，相机与能量雾随动 |
+| Swirl Strength | 旋转强度——切向速度倍率（0~3），默认 0.85 |
+| Compression Strength | 压缩强度——向心流速倍率（0~2），默认 **0.7**——需求建议 0.9 实测全部轨迹压进 0.4R 叠成白球，视觉验收优先调低；稳态平均半径 ≈0.31R |
+| Axis Mix | 轨道族旋转轴的离散程度（0=近乎同轴，1=全向交错），默认 0.62 |
+| Turbulence | Curl Noise 局部扰动强度（0~2），默认 0.1（5~12% 占比） |
+| Confinement | 球形约束力（0~3），默认 1.1 |
+| Drag | 阻尼（0~1），默认 0.1 |
+| Trail Persistence | 流线轨迹持续秒数（0.2~3.0），默认 2.4s；只控制可见段数，与播放速度解耦，实时生效 |
+| Blue Saturation | 蓝色饱和度（0~2.5），默认 1.4；围绕 luma 缩放色相纯度，有钳制兜底不漂白，实时生效 |
+| Trail Brightness | 流线亮度倍率（0.3~2），默认 1.0；只改明暗不改色相，实时生效 |
+| Core White Radius | 核心白半径（0.04~0.2，相对 R），默认 0.1；白色核心亮点的大小，实时生效 |
+| Bloom Strength | 泛光强度（0~1.2），默认 0.38；阈值固定 0.75 保留蓝色色相，实时生效 |
 | Time Scale | 播放速度（0~1），默认 0.22，实时生效 |
-
-V5 只服务于历史轨迹的参数（Propagation Delay / Trail Density /
-Trail Persistence / Trail Width / Flow Scroll Speed 等）已从面板移除，
-字段保留在 `VortexParams` 作内部默认值。
-
-**粒子/能量丝配色（V4 起：色相与运动半径解绑）**：
-每个 Orbit Family 在 init 时按固定配额分配稳定基础色（seed 洗牌：
-深蓝 `#075CFF` + 电光蓝 `#0A67FF` + 主体蓝 `#3BB8FF` + 少量青蓝 `#74E5FF`），
-运动全程不变；半径只控制亮度与 alpha，不让轨迹漂出白色。
-白色只属于独立的 Core Compression 核心层。V6 体积层的配色见上节。
+| Particle Count | 桌面默认 15000 / 移动端 8000（粒子降级为辅助层，数量比 V2 减半） |
+| Seed / Pause / Reset / Randomize / Bloom | 与银河引擎共用语义 |
 
 ## 物理模型（N-body 银河引擎）
 
@@ -254,12 +253,11 @@ Time Scale、自动环绕等全部保留。
 
 ## 性能
 
-- 银河：桌面默认 40000 粒子 / 移动端 12000；Vortex V6：粒子降级为边缘碎光，
-  桌面 5000 / 移动端 3000，DPR 上限 2。
+- 银河：桌面默认 40000 粒子 / 移动端 12000；Vortex：桌面 15000 / 移动端 8000，DPR 上限 2。
 - 全部粒子状态存 TypedArray，每帧零分配：就地更新 `position`/`aVel`/`aSpeed` attribute；
-  能量丝直接写 LineSegments2 底层 InterleavedBuffer；体积 Raymarch 26 步在单 pass 内完成。
-- 实测（Apple M2 Pro，真 GPU，DPR 2）：银河 40000 粒子 + 双层渲染 + Bloom ≈ 75 FPS；
-  Vortex V6 体积 Raymarch + 36 条能量丝 + 5000 粒子 ≈ 47 FPS（≥45 FPS 门槛，无需 GPUComputationRenderer）。
+  流线直接写 LineSegments2 底层 InterleavedBuffer。
+- 实测（Apple M2 Pro，真 GPU）：银河 40000 粒子 + 双层渲染 + Bloom ≈ 75 FPS；
+  Vortex 15000 粒子 + 100 条流线 + 体积雾 ≈ 75 FPS（远超 45 FPS，无需 GPUComputationRenderer）。
 - 重建/销毁时释放 `Geometry`、`Material`、`RenderTarget` 与事件监听；
   页面隐藏（`visibilitychange`）时暂停模拟与渲染。
 
@@ -274,8 +272,7 @@ src/
 ├── glowPlane.ts            # V3 银河光雾层：螺旋臂距离场 + fBm/domain warp + 暗尘带 shader
 ├── presets.ts              # 四个银河预设：核心质量/位置/速度/粒子盘参数
 ├── rng.ts                  # mulberry32 确定性随机 + 高斯采样 + seeded 2D/3D value-noise
-├── particles.ts            # 双渲染层 Points/ShaderMaterial + TrailRenderer 能量丝（36 条 CatmullRom 平滑）+ 核心辉光
-├── chakraVolume.ts         # V6 主视觉：球体 Raymarch 体积 Shader（fBm + 双旋转域 + Formation 显现遮罩）
+├── particles.ts            # 双渲染层 Points/ShaderMaterial + TrailRenderer 真实流线 + 核心辉光 + 破碎能量雾
 ├── renderer.ts             # 场景/相机/OrbitControls/ACES/Bloom/银河与 Vortex 取景
 ├── ui.ts                   # lil-gui 中文面板（引擎切换 + 两组参数 + ? 帮助）+ FPS 调试层
 └── types.ts                # 参数、预设类型与推荐参数表（含 DEFAULT_VORTEX）

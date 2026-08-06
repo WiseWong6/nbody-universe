@@ -9,24 +9,18 @@ import type { ParticleSimulation } from './simulation-interface';
  * Orbit Family 的局部旋转轴偏折，形成不规则交错、越近中心越快的螺旋流。
  *
  * 每步目标速度：
- *   target = inwardCompression + irregularSwirl + spiralInflow + turbulence
- *   inwardCompression = -normalize(p) · compression · 0.08R · smoothstep(0.10, 0.45, r/R)
- *   irregularSwirl    = tangent · swirl · 11 · ((R+ε)/(r+ε))^α · famSpeedMul[g]
- *                       α = 0.5·(0.5+0.5·coreSpin)，ε=0.12R：越靠近核心旋转越快
- *   spiralInflow      = -r̂_in · |vTan| · 0.12（轨道面内向内分量，把大圆轨道扭成
- *                       卷入核心的螺旋；切向:径向 ≈ 3.5:1，长弧包裹而非直落）
+ *   target = inwardCompression + irregularSwirl + turbulence
+ *   inwardCompression = -normalize(p) · compression · 0.32R · smoothstep(0.10, 0.45, r/R)
+ *   irregularSwirl    = tangent · swirl · 9 · ((R+ε)/(r+ε))^0.8 · famSpeedMul[g]
+ *                       （角速度 ∝ 1/(r+ε)^0.8，ε=0.12R：越靠近核心旋转越快）
  *   turbulence        = curlNoise · turbulence · 4   （只占 5%~12% 局部扰动）
  *   accel             = FOLLOW·(target − v) − drag·v
- *
- * 核心驱动的 Formation 动画（中心先形成、能量体再向外扩张）由
- * ChakraVolume Shader 的径向显现遮罩负责（V6），粒子全程处于稳态流。
  *
  * 15 个 Orbit Family 只提供「局部旋向」（seed 确定的独立旋转轴 + 极慢进动），
  * 不再把粒子绑在固定轨道半径上。流入核心（r < 0.085R）的 Flow 粒子
  * 由 seed 确定性重生到外缘，维持持续压缩流，不坍缩不逃逸。
  *
- * 粒子/流线颜色由所属 Orbit Family 的稳定基础色决定（深蓝/电光蓝/亮蓝/少量青蓝），
- * 半径只控亮度不改色相；白色只属于独立核心层。
+ * 粒子颜色每步按当前半径刷新（外蓝内白），流线末端到头部自然蓝白渐变。
  * 固定步长半隐式 Euler，mulberry32(seed) 全程确定。
  */
 
@@ -41,17 +35,12 @@ const CURL_GRID = 24;
 const FAMILIES = 15;
 /** 湍流扰动基准（相对主旋涡速度的比例系数） */
 const TURB_BASE = 4.0;
-/** 向心压缩速度基准（乘以 compression 与球半径）。
- * 取值保证切向速度明显大于径向（约 3.5:1）——粒子是「绕核心卷入的长弧螺旋」，
- * 而不是直落核心的放射线 */
-const COMPRESS_BASE = 0.08;
+/** 向心压缩速度基准（乘以 compression 与球半径） */
+const COMPRESS_BASE = 0.32;
 /** 角速度径向衰减指数（越近中心越快；0.5 温和加速，内层不缠成毛线球） */
 const SWIRL_ALPHA = 0.5;
 /** Flow 粒子流入该半径后回收重生到外缘 */
 const RECYCLE_RN = 0.12;
-/** 螺旋拓扑：轨道面内向内径向分量与切向速度的比值（大圆轨道 → 卷入核心的螺旋）。
- * 与 COMPRESS_BASE 共同决定螺距：过大会变成放射状直落，过小则退回球面绕圈 */
-const SPIRAL_PITCH = 0.12;
 
 export class VortexFieldSimulation implements ParticleSimulation {
   readonly params: VortexParams;
@@ -541,14 +530,7 @@ export class VortexFieldSimulation implements ParticleSimulation {
     out: Float32Array,
     o: number
   ): Float32Array {
-    const {
-      swirl,
-      axisMix,
-      turbulence,
-      compression,
-      radius: R,
-      coreSpin,
-    } = this.params;
+    const { swirl, axisMix, turbulence, compression, radius: R } = this.params;
 
     // 有效轴 = mix(sharedAxis, famAxis, axisMix)
     let ax = this.sharedAxis[0] * (1 - axisMix) + this.famAxis[g * 3] * axisMix;
@@ -578,31 +560,10 @@ export class VortexFieldSimulation implements ParticleSimulation {
       tz = this.famU[g * 3 + 2];
     }
 
-    // 切向速度：角速度 ∝ 1/(r+ε)^α，越靠近中心旋转越快（高旋转密度）。
-    // α = 0.5·(0.5+0.5·coreSpin)：coreSpin 越大核心旋转主导性越强。
-    // V6：粒子全程处于稳态流——Formation（中心先形成、再向外扩张）
-    // 由 ChakraVolume Shader 的径向显现遮罩负责，不再用传播延迟拖慢粒子启动
+    // 切向速度：角速度 ∝ 1/(r+ε)^0.6，越靠近中心旋转越快（高旋转密度）
     const eps = 0.12 * R;
-    const alpha = SWIRL_ALPHA * (0.5 + 0.5 * coreSpin);
-    const vTan = swirl * 11 * Math.pow((R + eps) / (r + eps), alpha) * this.famSpeedMul[g];
-
-    // 螺旋拓扑：在轨道面内加入向内的径向分量，把「球面大圆轨道」
-    // 扭成「围绕核心卷入的螺旋流线」（反向旋转族同样始终向内卷）
-    const pdot = px * ax + py * ay + pz * az;
-    let rx = px - ax * pdot;
-    let ry = py - ay * pdot;
-    let rz = pz - az * pdot;
-    const rl = Math.hypot(rx, ry, rz);
-    let sx = 0;
-    let sy = 0;
-    let sz = 0;
-    if (rl > 1e-4 * r) {
-      const rinv = 1 / rl;
-      const sp = Math.abs(vTan) * SPIRAL_PITCH;
-      sx = -rx * rinv * sp;
-      sy = -ry * rinv * sp;
-      sz = -rz * rinv * sp;
-    }
+    const vTan =
+      swirl * 7.5 * Math.pow((R + eps) / (r + eps), SWIRL_ALPHA) * this.famSpeedMul[g];
 
     // 向心压缩：-normalize(p)·compression·0.32R·smoothstep(0.10, 0.45, rn)
     // 中心附近渐零（避免与回收/防坍缩打架），中外部恒定拉向球心
@@ -616,9 +577,9 @@ export class VortexFieldSimulation implements ParticleSimulation {
     this.sampleCurl(px, py, pz, this.turbScratch, 0);
     const ts = turbulence * TURB_BASE;
 
-    out[o] = tx * vTan + sx + inx + this.turbScratch[0] * ts;
-    out[o + 1] = ty * vTan + sy + iny + this.turbScratch[1] * ts;
-    out[o + 2] = tz * vTan + sz + inz + this.turbScratch[2] * ts;
+    out[o] = tx * vTan + inx + this.turbScratch[0] * ts;
+    out[o + 1] = ty * vTan + iny + this.turbScratch[1] * ts;
+    out[o + 2] = tz * vTan + inz + this.turbScratch[2] * ts;
     return out;
   }
 

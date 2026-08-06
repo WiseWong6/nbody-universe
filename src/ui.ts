@@ -15,8 +15,6 @@ export interface UiCallbacks {
   onTrailChange(v: number): void;
   /** 颜色系统实时调整：蓝色饱和度/流线亮度/核心白半径/泛光强度（无需重建） */
   onColorLive(): void;
-  /** 轨迹密度变化：只重建流线层（无需重建模拟） */
-  onTrailRebuild(): void;
   /** Randomize：换一个新 seed 并重建 */
   onRandomize(): number;
 }
@@ -37,7 +35,7 @@ const ENGINE_LABELS: Record<EngineName, string> = {
 /** 每个参数的帮助说明（? 图标弹出内容） */
 const HELP = {
   engine:
-    '选择模拟引擎。\n\n银河 Galaxy：N-body 引力模拟，含主银河 / 旋涡星系 / 星系碰撞 / 三体混沌四个场景（Art Preview 静态预览，URL 加 ?mode=sim 可恢复动画）。\n\n旋涡能量球 Vortex Energy：V6 Chakra Volume——球体 Raymarch 体积 Shader 的连续蓝白查克拉能量体（螺旋丸式效果原型）：核心先形成并旋转、能量体再向外扩张，稳态下外层能量持续向内压缩、越近中心旋转越快；少量平滑能量丝与边缘碎光只作辅助。\n\n切换引擎会刷新页面并套用该引擎的默认参数。',
+    '选择模拟引擎。\n\n银河 Galaxy：N-body 引力模拟，含主银河 / 旋涡星系 / 星系碰撞 / 三体混沌四个场景（Art Preview 静态预览，URL 加 ?mode=sim 可恢复动画）。\n\n旋涡能量球 Vortex Energy：向心压缩 + 不规则旋涡驱动的三维查克拉能量球（螺旋丸式效果原型）——能量从不同方向流向中心、越近中心旋转越快。\n\n切换引擎会刷新页面并套用该引擎的默认参数。',
   preset:
     '选择模拟场景。\n\n主银河：艺术引导分布的银河（核球+双旋臂+星盘+星晕），第一眼即有星河结构。\n\n旋涡星系：单核心指数盘，验证基础轨道。\n\n星系碰撞：两个星系相向掠过、拉伸、交错。\n\n三体混沌：三个核心混沌互绕，粒子被撕裂甩出。\n\n切换会套用该场景的推荐参数并重建。',
   gravity:
@@ -52,24 +50,36 @@ const HELP = {
     '示踪粒子数量（2k~80k）。\n\n桌面默认 40000，移动端默认 12000。\n数量只影响视觉密度，不影响单个粒子的运动规律（粒子之间不互算引力）。修改后自动重建。',
   seed:
     '随机种子（1~99999）。\n\n所有初始位置、速度、颜色、闪烁都由它决定：相同 seed + 相同参数 = 完全相同的宇宙。想换 layout 就改种子或点「随机生成」。',
+  radius:
+    '能量球半径（5~60）。\n\n调大：球体更大，粒子分布更稀疏，旋转周期更长；\n调小：更紧凑、更密集。\n\n相机距离与能量雾范围会随之自动调整。修改后重建。',
+  swirl:
+    '旋转强度（0~3），局部旋涡角速度的整体倍率。\n\n角速度 ∝ 1/(r+ε)^0.8：越靠近中心旋转越快（高旋转密度），不是整体匀速自转。\n\n调大：查克拉流旋转更快、更有力量感；\n调小：缓慢翻涌；\n0 = 只剩向心压缩与湍流。\n\n默认 0.85。注意：轨迹弧线长度由「轨迹持续」控制，不靠提高转速。修改后重建。',
   compression:
-    '向心压缩强度（0~2），默认 0.7。\n\n所有 Flow 粒子持续向球心流动的速度倍率——这是「查克拉从不同方向流动、向中心凝聚压缩」的核心参数：\n\n调大：向心流更快，能量明显向核心汇聚；\n调小：流动缓慢舒展，螺旋更松；\n0 = 无向心流，退化为纯旋涡绕圈。\n\n流入核心的粒子会确定性重生到外缘，维持持续压缩。实时生效，无需重建。',
+    '向心压缩强度（0~2），默认 0.7。\n\n所有 Flow 粒子持续向球心流动的速度倍率——这是「查克拉从不同方向流动、向中心凝聚压缩」的核心参数：\n\n调大：向心流更快，流线明显向核心俯冲汇聚；\n调小：流动缓慢舒展，螺旋更松；\n0 = 无向心流，退化为纯旋涡绕圈（旧版球壳感）。\n\n流入核心的粒子会确定性重生到外缘，维持持续压缩。修改后重建。',
+  axisMix:
+    '多轴混合（0~1）。\n\n能量球保留 15 个 Orbit Family，每族有独立的局部旋转轴——粒子在向心流动中被所属族的旋向偏折，形成不规则交错的螺旋流。\n\n0 = 所有族共用一条轴（退化为单轴螺旋）；\n1 = 15 族完全分轴，多向交错缠绕；\n默认 0.62：分轴为主、保留少量整体一致性。\n\n这是「不同方向都有查克拉流」的关键参数。修改后重建。',
   turbulence:
-    '湍流扰动（0~2），默认 0.1。\n\n同时作用于两处：\n1. 粒子的 Curl Noise 局部扰动（占整体速度 5%~12%）；\n2. 体积纹理的 domain warping 幅度——让能量体出现不规则卷动而非均匀条纹。\n\n调大：能量体更毛糙不羁；\n调小：更光滑规整。实时生效，无需重建。',
-  formationDuration:
-    '形成时长（0.5~6 模拟秒，默认 2.5）。\n\n螺旋丸的形成动画（Formation）节奏，由体积 Shader 的径向显现遮罩驱动：\n\n0~20%：中心先出现并开始旋转；\n20%~100%：能量体从中心逐步扩张到外缘；\n之后进入稳定状态（外层能量持续向内压缩、核心高速旋转）。\n\n调小：快速成形；调大：缓慢凝聚。\n\n只影响视觉显现，不再用延迟拖慢粒子启动。实时生效，无需重建。',
-  outerSpin:
-    '外层旋转速度（0~2 rad/s，默认 0.35）。\n\n体积纹理在外缘的角速度。内层角速度由「核心旋转」决定且始终更快：\n\nomega(r) = mix(核心旋转, 外层旋转, (r/R)^0.7)\n\n两个不同轴向/速度的旋转域叠加，形成不规则但统一围绕核心的旋涡——没有经纬线，没有原子轨道。\n\n实时生效，无需重建。',
-  volumeDensity:
-    '体积密度（0~2.5，默认 1.1）。\n\nRaymarch 能量体的浓度倍率：\n\n调大：能量体更实更亮，中心更饱满；\n调小：更通透稀薄，暗缝更明显；\n0 = 只剩辅助能量丝与核心。\n\n实时生效，无需重建。',
-  ribbonAmount:
-    '能量丝数量（0~64 条，默认 36）。\n\n辅助层：少量短弧能量丝（Catmull-Rom 平滑细线，透明度低于体积主体），只为体积能量补充局部高光丝，不能勾勒完整球壳。\n\n0 = 纯体积能量体。修改后只重建能量丝层，模拟不重置。',
-  coreSpin:
-    '核心旋转强度（0~3，默认 1.2）。\n\n同时驱动两件事：\n1. 体积纹理内层角速度——omega(r) = mix(核心旋转, 外层旋转, (r/R)^0.7)，核心快、外围慢；\n2. 粒子旋转径向变陡指数 α = 0.5·(0.5+0.5·coreSpin)。\n\n调大：核心旋涡主导性更强（中心高密度快旋，外缘缓慢）；\n调小：各层旋转速度趋于平均。\n\n实时生效，无需重建。',
+    '湍流扰动（0~2），默认 0.1。\n\nCurl Noise 无散度噪声只作为少量局部扰动（占整体速度 5%~12%），让流线出现自然的抖动与不规则感，不能主导运动。\n\n调大：流线更毛糙不羁；\n调小：流线更光滑规整。修改后重建。',
+  confinement:
+    '球形约束力（0~3）。\n\n粒子超出约 0.85R 后受到向内的柔性回复力，越大回拉越强、球体轮廓越清晰；\n过小：粒子逐渐逃逸，球体发散；\n过大：边缘反弹感明显，不自然。修改后重建。',
+  drag:
+    '阻尼系数（0~1），与速度成正比的减速力。\n\n调大：流动更快趋于平稳、能量感下降；\n调小：流动更自由持久。\n\n与湍流、约束力共同决定稳态下的运动烈度。修改后重建。',
+  trailPersistence:
+    '轨迹持续时间（0.2~3 模拟秒，默认 2.4）。\n\n100 条代表粒子的真实历史轨迹（头亮尾淡的长弧），该参数控制轨迹可见的时间长度：\n\n调大：弧线更长更完整，可环绕球体；\n调小：只剩头部短弧。\n\n与播放速度完全解耦——即使时间流速很低或暂停，长弧依然清晰。\n\n实时生效，无需重建。',
+  blueSaturation:
+    '蓝色饱和度（0~2.5，默认 1.4）。\n\n围绕亮度轴缩放流线与粒子的色相纯度：\n\n调大：蓝色更纯更艳（电光蓝更"电"）；\n调小：趋向灰蓝；\n0 = 灰度。\n\n只改色相纯度，不改明暗。有饱和度钳制兜底——任何值都不会漂出白色。实时生效，无需重建。',
+  coreWhiteRadius:
+    '核心白半径（0.04~0.2，相对球半径，默认 0.1）。\n\n白色只允许出现在独立的 Core Compression 核心层，该参数控制白色区域的大小：\n\n调大：白色核心更大更亮；\n调小：白色收缩成一点，球体几乎全蓝。\n\n核心之外会立刻过渡回高饱和蓝。流线与粒子不承担制造白色的职责。实时生效，无需重建。',
+  trailBrightness:
+    '流线亮度倍率（0.3~2，默认 1.0）。\n\n整体缩放轨迹流线的明暗，不改变色相：\n\n调大：流线更亮更有能量感；\n调小：流线变暗，核心与粒子相对突出。\n\n实时生效，无需重建。',
   bloomStrength:
     '泛光强度（0~1.2，默认 0.38）。\n\nBloom 后期效果的强度。阈值固定 0.75——只拾取最亮的流线头部与核心，保留蓝色色相，不会把高亮蓝漂成纯白。\n\n调大：光晕更宽更柔；\n调小：画面更锐利干净。实时生效，无需重建。',
   vTimeScale:
     '播放速度倍率（0~1）。\n\n0 = 物理完全静止（镜头仍可动）；\n0.22 = 默认值，缓慢压缩演化的能量球；\n1 = 实时物理速度。\n\n只缩放时间流，不改变物理步长。实时生效，无需重建。',
+  vParticleCount:
+    '粒子数量（2k~60k）。\n\n桌面默认 15000，移动端默认 8000。\n粒子只做辅助质感（主视觉是流线轨迹），数量只影响填充密度，不影响运动规律。修改后自动重建。',
+  vSeed:
+    '随机种子（1~99999）。\n\n15 个轨道族的轴方向/速度、初始分布、湍流噪声场、颜色抖动、回收重生顺序都由它决定：相同 seed + 相同参数 = 完全相同的能量球。修改后重建。',
   paused:
     '暂停/继续物理步进。\n\n暂停时粒子冻结，但镜头仍可旋转缩放，方便观察三维结构。',
   bloom:
@@ -210,66 +220,97 @@ export class Ui {
     );
 
     // ------------------------------------------------------------ 旋涡参数
-    // V6 Chakra Volume：只保留体积/形成/辅助丝相关 8 个参数 + 时间流速，
-    // V5 只服务于历史轨迹的参数（Propagation Delay / Trail Density /
-    // Trail Persistence 等）已从面板移除
     const vortexFolder = this.gui.addFolder('旋涡参数');
     vortexFolder.domElement.style.display = engine === 'vortex' ? '' : 'none';
 
     this.addHelp(
       vortexFolder
-        .add(vortexParams, 'formationDuration', 0.5, 6, 0.1)
-        .name('形成时长')
-        .onChange(() => callbacks.onColorLive()),
-      HELP.formationDuration
+        .add(vortexParams, 'radius', 5, 60, 1)
+        .name('球体半径')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.radius
     );
 
     this.addHelp(
       vortexFolder
-        .add(vortexParams, 'coreSpin', 0, 3, 0.05)
-        .name('核心旋转')
-        .onChange(() => callbacks.onColorLive()),
-      HELP.coreSpin
-    );
-
-    this.addHelp(
-      vortexFolder
-        .add(vortexParams, 'outerSpin', 0, 2, 0.05)
-        .name('外层旋转')
-        .onChange(() => callbacks.onColorLive()),
-      HELP.outerSpin
+        .add(vortexParams, 'swirl', 0, 3, 0.05)
+        .name('旋转强度')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.swirl
     );
 
     this.addHelp(
       vortexFolder
         .add(vortexParams, 'compression', 0, 2, 0.05)
         .name('压缩强度')
-        .onChange(() => callbacks.onColorLive()),
+        .onFinishChange(() => callbacks.onRegenerate()),
       HELP.compression
     );
 
     this.addHelp(
       vortexFolder
-        .add(vortexParams, 'volumeDensity', 0, 2.5, 0.05)
-        .name('体积密度')
-        .onChange(() => callbacks.onColorLive()),
-      HELP.volumeDensity
+        .add(vortexParams, 'axisMix', 0, 1, 0.02)
+        .name('多轴混合')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.axisMix
     );
 
     this.addHelp(
       vortexFolder
         .add(vortexParams, 'turbulence', 0, 2, 0.05)
         .name('湍流强度')
-        .onChange(() => callbacks.onColorLive()),
+        .onFinishChange(() => callbacks.onRegenerate()),
       HELP.turbulence
     );
 
     this.addHelp(
       vortexFolder
-        .add(vortexParams, 'ribbonAmount', 0, 64, 4)
-        .name('能量丝数量')
-        .onFinishChange(() => callbacks.onTrailRebuild()),
-      HELP.ribbonAmount
+        .add(vortexParams, 'confinement', 0, 3, 0.05)
+        .name('球形约束')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.confinement
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'drag', 0, 1, 0.01)
+        .name('阻尼')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.drag
+    );
+
+    // 轨迹持续 / 时间流速：实时生效，无需重建
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'trailPersistence', 0.2, 3.0, 0.05)
+        .name('轨迹持续')
+        .onChange((v: number) => callbacks.onTrailChange(v)),
+      HELP.trailPersistence
+    );
+
+    // ---- 颜色系统（实时生效，无需重建）----
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'blueSaturation', 0, 2.5, 0.05)
+        .name('蓝色饱和度')
+        .onChange(() => callbacks.onColorLive()),
+      HELP.blueSaturation
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'trailBrightness', 0.3, 2, 0.05)
+        .name('流线亮度')
+        .onChange(() => callbacks.onColorLive()),
+      HELP.trailBrightness
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'coreWhiteRadius', 0.04, 0.2, 0.005)
+        .name('核心白半径')
+        .onChange(() => callbacks.onColorLive()),
+      HELP.coreWhiteRadius
     );
 
     this.addHelp(
@@ -283,6 +324,22 @@ export class Ui {
     this.addHelp(
       vortexFolder.add(vortexParams, 'timeScale', 0, 1, 0.01).name('时间流速'),
       HELP.vTimeScale
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'particleCount', 2000, 60000, 1000)
+        .name('粒子数量')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.vParticleCount
+    );
+
+    this.addHelp(
+      vortexFolder
+        .add(vortexParams, 'seed', 1, 99999, 1)
+        .name('随机种子')
+        .onFinishChange(() => callbacks.onRegenerate()),
+      HELP.vSeed
     );
 
     // ------------------------------------------------------------ 通用控制

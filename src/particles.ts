@@ -507,17 +507,11 @@ export function createVortexCore(radius: number): VortexCore {
 
 // ---------------------------------------------------------------- 真实流线
 
-/** 默认轨迹条数（V6：辅助能量丝 24~48 条；Ribbon Amount 可调重建）与历史深度 */
-const TRAIL_COUNT = 36;
-const TRAIL_HISTORY = 160;
+/** 轨迹条数与历史深度（条数克制、每条更粗更清晰，避免细线堆成毛线球） */
+const TRAIL_COUNT = 100;
+const TRAIL_HISTORY = 96;
 /** 记录间隔（模拟秒）：跟随模拟时间，与播放速度解耦 */
 const TRAIL_DT = 1 / 60;
-/** 三组轨迹：外层长弧 40% / 中层弯折弧 35% / 核心短旋流 25%，各自持续倍率 */
-const TRAIL_GROUPS = [
-  { share: 0.4, rMin: 0.65, rMax: 99, persist: 1.0 }, // 外层长弧
-  { share: 0.35, rMin: 0.35, rMax: 0.65, persist: 0.85 }, // 中层弯折弧
-  { share: 0.25, rMin: 0, rMax: 0.35, persist: 0.6 }, // 核心高密度短旋流
-];
 
 export interface TrailRenderer {
   object: THREE.Object3D;
@@ -533,81 +527,41 @@ export interface TrailRenderer {
   setBrightness(v: number): void;
   /** 蓝色饱和度倍率（围绕 luma 缩放族基础色），实时生效 */
   setSaturation(v: number): void;
-  /** 轨迹宽度 px，实时生效 */
-  setWidth(px: number): void;
-  /** 流动亮纹滚动速度（波形/秒，0 = 静止），实时生效 */
-  setScrollSpeed(v: number): void;
   /** 视口尺寸变化时更新 LineMaterial.resolution */
   setResolution(width: number, height: number): void;
   dispose(): void;
 }
 
 /**
- * 辅助能量丝（V6 起降级为辅助层，主视觉是 ChakraVolume 体积 Shader）：
- * 挑选 24~48 个代表 Flow 粒子，保存最近 160 个 60Hz 采样的历史位置，
- * 用 LineSegments2（fat lines，细线 0.6~1.2px）绘制短弧与局部能量丝。
- * 每个历史间隔输出 2 段（Catmull-Rom 中点平滑），禁止折角；
- * 透明度低于体积主体，不勾勒完整球壳。
+ * 真实连续流线（主视觉层）：挑选 100 个代表 Flow 粒子，保存最近 96 个
+ * 60Hz 采样的历史位置，用 LineSegments2（fat lines）绘制头亮尾淡的长弧。
  * 颜色系统（V4）：色相 = 粒子所属轨道族的稳定基础色（init 分配，全程不变），
  * 半径只控制亮度（外暗内亮），头部更亮但仍然是蓝——白色只属于核心层；
  * 回收重生跳变时单条轨迹清零重记。
  * Trail Persistence 只控制可见段数，与物理速度完全解耦。
  */
-export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT): TrailRenderer {
-  const T = count;
+export function createTrailRenderer(sim: ParticleSimulation): TrailRenderer {
+  const T = TRAIL_COUNT;
   const H = TRAIL_HISTORY;
 
-  // 代表粒子：按初始半径分三组确定性抽样——外层长弧 / 中层弯折弧 / 核心短旋流。
-  // 不做径向速度过滤——向心压缩模型下 Flow 粒子本来就要螺旋潜入核心，
+  // 代表粒子：在普通层（[0, brightStart)）内等距步长确定性抽样。
+  // 不做半径/径向速度过滤——向心压缩模型下 Flow 粒子本来就要螺旋潜入核心，
   // 轨迹向内汇聚正是主视觉。
   const pool = sim.brightStart;
   const indices = new Int32Array(T);
-  const persistMul = new Float32Array(T);
   let maxR = 1e-6;
   {
     const pos = sim.position;
-    // 第一遍：估计球半径（pool 内 Flow 粒子最大半径 ≈ 1.0R）
-    for (let i = 0; i < pool; i++) {
+    let found = 0;
+    let idx = 0;
+    const stride = 7; // 与 pool 互质概率高，简单打散
+    while (found < T && idx < pool * 3) {
+      const i = idx % pool;
+      indices[found++] = i;
       const io = i * 3;
       const r = Math.hypot(pos[io], pos[io + 1], pos[io + 2]);
       if (r > maxR) maxR = r;
-    }
-    // 第二遍：按半径带分桶
-    const buckets: number[][] = TRAIL_GROUPS.map(() => []);
-    for (let i = 0; i < pool; i++) {
-      const io = i * 3;
-      const r = Math.hypot(pos[io], pos[io + 1], pos[io + 2]);
-      const rn = r / maxR;
-      for (let b = 0; b < TRAIL_GROUPS.length; b++) {
-        if (rn >= TRAIL_GROUPS[b].rMin && rn < TRAIL_GROUPS[b].rMax) {
-          buckets[b].push(i);
-          break;
-        }
-      }
-    }
-    let cursor = 0;
-    for (let b = 0; b < TRAIL_GROUPS.length; b++) {
-      const list = buckets[b];
-      const want =
-        b === TRAIL_GROUPS.length - 1 ? T - cursor : Math.round(T * TRAIL_GROUPS[b].share);
-      if (list.length === 0) continue;
-      // 等距步长确定性抽样（步长与桶长互质概率高，简单打散）
-      const stride = Math.max(1, Math.floor(list.length / Math.max(want, 1)) | 1);
-      let picked = 0;
-      let idx = 0;
-      while (picked < want && cursor < T && idx < list.length * 2) {
-        indices[cursor] = list[idx % list.length];
-        persistMul[cursor] = TRAIL_GROUPS[b].persist;
-        cursor++;
-        picked++;
-        idx += stride;
-      }
-    }
-    // 桶不足时兜底填满
-    while (cursor < T) {
-      indices[cursor] = cursor % pool;
-      persistMul[cursor] = 1.0;
-      cursor++;
+      idx += stride;
     }
   }
   // 位置跳变阈值：Flow 粒子回收重生到外缘时历史出现跳变，需重置该条轨迹
@@ -639,16 +593,12 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
   const filledT = new Uint16Array(T);
   let cursor = -1;
   let lastSimTime = -1;
-  let persistence = 1.5;
+  let persistence = 2.4;
   let brightness = 1.0;
   let saturation = 1.4;
-  let scrollSpeed = 0.8;
-  let refreshTime = 0;
 
   const geometry = new LineSegmentsGeometry();
-  // 每个历史间隔输出 2 段（Catmull-Rom 中点平滑，禁止折角）
-  const SUB = 2;
-  const segCount = T * (H - 1) * SUB;
+  const segCount = T * (H - 1);
   // 交错布局：每段 [start xyz, end xyz]，一次分配，之后就地更新
   const positions = new Float32Array(segCount * 6);
   const colors = new Float32Array(segCount * 6);
@@ -661,10 +611,10 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
   const colBuf = colAttr.data.array as Float32Array;
 
   const material = new LineMaterial({
-    linewidth: 0.9, // px：V6 辅助能量丝，细而克制
+    linewidth: 4.2, // px：宽带状能量流，不是细线
     vertexColors: true,
     transparent: true,
-    opacity: 0.4, // 低于体积主体：线条只是辅助，不能勾勒球壳
+    opacity: 0.65, // Trail Opacity：压低 additive 堆叠上限，防止漂白
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   });
@@ -701,28 +651,19 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
   // 段颜色 = 族稳定基础色 × 饱和度 × 半径亮度 × 头部衰减 × 亮度倍率。
   // 色相全程固定（尾与头同一个蓝），半径只控制明暗——解除「半径 → 色相」绑定，
   // 头部可以更亮，但永远是蓝色，白色只属于独立的 Core Compression 核心层。
-  /** 半径 → 亮度（核心 0.68 → 外缘 0.55），色相不变。
-   *  内层弧线投影密度高，亮度随密度反压——宁可密处稳蓝，不可叠出青白；
-   *  外缘保持 0.55 高保底——长弧全程可读，不会断成一截截亮斑 */
-  function depthLum(hx: number, hy: number, hz: number): number {
+  /** 半径 → 亮度（核心 0.6 → 外缘 0.38），色相不变。
+   *  内层弧线投影密度高，亮度随密度反压——宁可密处稳蓝，不可叠出青白 */
+  function depthLum(ho: number): number {
+    const hx = history[ho];
+    const hy = history[ho + 1];
+    const hz = history[ho + 2];
     const rn = Math.min(Math.sqrt(hx * hx + hy * hy + hz * hz) / maxR, 1.2);
-    return 0.68 - 0.13 * Math.min(rn / 0.9, 1);
+    return 0.6 - 0.22 * Math.min(rn / 0.9, 1);
   }
 
   function refresh(): void {
-    // 基准可见段数：persistence 秒 × 60Hz，最少 4 段；每条轨迹再乘所在组倍率
-    const baseVisible = Math.max(4, Math.min(H - 1, Math.round(persistence / TRAIL_DT)));
-    // 流动亮纹相位推进：waves·(u + t·speed)，沿轨迹向头部（核心）奔跑
-    const scroll = scrollSpeed * refreshTime;
-    // 头部最亮 → 尾部渐隐（additive：黑即透明）；
-    // 0.32 亮度地板 + 平缓指数：弧线全程连续可见，尾部只是略暗
-    const fade = (x: number, visible: number): number =>
-      Math.max(Math.pow(1 - x / visible, 0.55), 0.32);
-    const wave = (x: number, visible: number, phase: number): number =>
-      scrollSpeed > 0
-        ? 0.82 + 0.4 * Math.pow(0.5 + 0.5 * Math.sin(6.2832 * ((x / visible) * 2 + scroll + phase)), 2)
-        : 1;
-
+    // 可见段数：persistence 秒 × 60Hz，最少 4 段
+    const visible = Math.max(4, Math.min(H - 1, Math.round(persistence / TRAIL_DT)));
     let seg = 0;
     for (let t = 0; t < T; t++) {
       // 族基础色 × 蓝色饱和度（围绕 luma 缩放；>1 更饱和）
@@ -743,70 +684,37 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
       if (cg > cb * 0.62) cg = cb * 0.62;
       if (cr > cb * 0.42) cr = cb * 0.42;
 
-      const visible = Math.max(4, Math.round(baseVisible * persistMul[t]));
-      // 每条轨迹的亮纹相位（确定性打散，不同步闪动）
-      const phase = (t * 0.6180339887) % 1;
       const ft = filledT[t];
       for (let s = 0; s < H - 1; s++) {
         // s=0 为最新段（头），s 越大越旧（尾）
-        const h0 = (t * H + ((cursor - s + 1 + H * 2) % H)) * 3; // 更新一格（s=0 时同 h1）
         const h1 = (t * H + ((cursor - s + H * 2) % H)) * 3;
         const h2 = (t * H + ((cursor - s - 1 + H * 2) % H)) * 3;
-        const h3 = (t * H + ((cursor - s - 2 + H * 2) % H)) * 3;
-        const p1x = history[h1];
-        const p1y = history[h1 + 1];
-        const p1z = history[h1 + 2];
-        const p2x = history[h2];
-        const p2y = history[h2 + 1];
-        const p2z = history[h2 + 2];
-        // Catmull-Rom 中点（t=0.5）：0.5625·(p1+p2) − 0.0625·(p0+p3)，
-        // 每个历史间隔输出 p1→m、m→p2 两段，折角被磨圆
-        const mx = 0.5625 * (p1x + p2x) - 0.0625 * (history[h0] + history[h3]);
-        const my = 0.5625 * (p1y + p2y) - 0.0625 * (history[h0 + 1] + history[h3 + 1]);
-        const mz = 0.5625 * (p1z + p2z) - 0.0625 * (history[h0 + 2] + history[h3 + 2]);
+        const p6 = seg * 6;
+        posBuf[p6] = history[h1];
+        posBuf[p6 + 1] = history[h1 + 1];
+        posBuf[p6 + 2] = history[h1 + 2];
+        posBuf[p6 + 3] = history[h2];
+        posBuf[p6 + 4] = history[h2 + 1];
+        posBuf[p6 + 5] = history[h2 + 2];
 
         let f1 = 0;
-        let fm = 0;
         let f2 = 0;
         // 段 s 连接采样点 s 与 s+1：两个采样都已记录才可见（s+1 < ft）
         if (s + 1 < ft && s < visible) {
-          f1 = fade(s, visible) * wave(s, visible, phase);
-          fm = fade(s + 0.5, visible) * wave(s + 0.5, visible, phase);
-          f2 = fade(s + 1, visible) * wave(s + 1, visible, phase);
+          // 头部最亮 → 尾部渐隐（additive：黑即透明）；
+          // 指数 1.2 让外侧蓝色尾弧保持可见，不只剩内侧亮段
+          f1 = Math.pow(1 - s / visible, 1.2);
+          f2 = Math.pow(1 - (s + 1) / visible, 1.2);
         }
-        const m1 = f1 * depthLum(p1x, p1y, p1z) * brightness;
-        const mm = fm * depthLum(mx, my, mz) * brightness;
-        const m2 = f2 * depthLum(p2x, p2y, p2z) * brightness;
-
-        const p6 = seg * 6;
-        // 段 1：p1 → m
-        posBuf[p6] = p1x;
-        posBuf[p6 + 1] = p1y;
-        posBuf[p6 + 2] = p1z;
-        posBuf[p6 + 3] = mx;
-        posBuf[p6 + 4] = my;
-        posBuf[p6 + 5] = mz;
+        const m1 = f1 * depthLum(h1) * brightness;
+        const m2 = f2 * depthLum(h2) * brightness;
         colBuf[p6] = cr * m1;
         colBuf[p6 + 1] = cg * m1;
         colBuf[p6 + 2] = cb * m1;
-        colBuf[p6 + 3] = cr * mm;
-        colBuf[p6 + 4] = cg * mm;
-        colBuf[p6 + 5] = cb * mm;
-        // 段 2：m → p2
-        const q6 = p6 + 6;
-        posBuf[q6] = mx;
-        posBuf[q6 + 1] = my;
-        posBuf[q6 + 2] = mz;
-        posBuf[q6 + 3] = p2x;
-        posBuf[q6 + 4] = p2y;
-        posBuf[q6 + 5] = p2z;
-        colBuf[q6] = cr * mm;
-        colBuf[q6 + 1] = cg * mm;
-        colBuf[q6 + 2] = cb * mm;
-        colBuf[q6 + 3] = cr * m2;
-        colBuf[q6 + 4] = cg * m2;
-        colBuf[q6 + 5] = cb * m2;
-        seg += 2;
+        colBuf[p6 + 3] = cr * m2;
+        colBuf[p6 + 4] = cg * m2;
+        colBuf[p6 + 5] = cb * m2;
+        seg++;
       }
     }
     posAttr.data.needsUpdate = true;
@@ -823,7 +731,6 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
         record();
         lastSimTime += TRAIL_DT;
       }
-      refreshTime = simTime;
       refresh();
     },
     setPersistence(seconds: number) {
@@ -834,12 +741,6 @@ export function createTrailRenderer(sim: ParticleSimulation, count = TRAIL_COUNT
     },
     setSaturation(v: number) {
       saturation = v;
-    },
-    setWidth(px: number) {
-      material.linewidth = px;
-    },
-    setScrollSpeed(v: number) {
-      scrollSpeed = v;
     },
     setResolution(width: number, height: number) {
       material.resolution.set(width, height);

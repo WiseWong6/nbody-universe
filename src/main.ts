@@ -2,8 +2,7 @@ import './style.css';
 import { NBodySimulation } from './simulation';
 import { VortexFieldSimulation } from './vortex';
 import type { ParticleSimulation } from './simulation-interface';
-import { createStarField, createCoreGlow, createVortexCore, createTrailRenderer, type StarField, type CoreGlow, type VortexCore, type TrailRenderer } from './particles';
-import { createChakraVolume, type ChakraVolume } from './chakraVolume';
+import { createStarField, createCoreGlow, createEnergyHaze, createVortexCore, createTrailRenderer, type StarField, type CoreGlow, type EnergyHaze, type VortexCore, type TrailRenderer } from './particles';
 import { createGlowPlane, type GlowPlane } from './glowPlane';
 import { Renderer } from './renderer';
 import { Ui } from './ui';
@@ -71,8 +70,7 @@ if (urlPreset) {
 
 const vortexParams: VortexParams = {
   ...DEFAULT_VORTEX,
-  // V6：粒子只是少量边缘碎光（视觉 ≤5%），数量减半再减
-  particleCount: mobile ? 3000 : 5000,
+  particleCount: mobile ? 8000 : 15000,
   seed,
 };
 
@@ -83,7 +81,7 @@ let sim: ParticleSimulation;
 let stars: StarField;
 let coreGlow: CoreGlow | null = null;
 let glowPlane: GlowPlane | null = null;
-let volume: ChakraVolume | null = null;
+let haze: EnergyHaze | null = null;
 let vortexCore: VortexCore | null = null;
 let trails: TrailRenderer | null = null;
 
@@ -108,10 +106,10 @@ function regenerate(): void {
     glowPlane.dispose();
     glowPlane = null;
   }
-  if (volume) {
-    renderer.scene.remove(volume.object);
-    volume.dispose();
-    volume = null;
+  if (haze) {
+    renderer.scene.remove(haze.mesh);
+    haze.dispose();
+    haze = null;
   }
   if (vortexCore) {
     renderer.scene.remove(vortexCore.mesh);
@@ -151,23 +149,15 @@ function regenerate(): void {
     }
   } else {
     sim = new VortexFieldSimulation(vortexParams);
-    // 粒子是辅助层（边缘碎光，视觉占比 ≤5%）；V6 主视觉是 ChakraVolume 体积 Shader；
+    // 粒子是辅助层：boost 1.0 弱化噪点感，主视觉交给流线；
     // dynamicColor：颜色每物理步按半径刷新（外蓝内白）
-    stars = createStarField(sim, renderer.pixelRatio, { speedRef: 12.0, boost: 0.35, brightMaxLum: 1.6, dynamicColor: true });
-    // V6 主视觉：球体 Raymarch 体积能量体（连续蓝白查克拉流，Formation 径向显现）
-    volume = createChakraVolume(vortexParams.radius);
-    volume.setSpin(vortexParams.coreSpin, vortexParams.outerSpin);
-    volume.setDensity(vortexParams.volumeDensity);
-    volume.setTurbulence(vortexParams.turbulence);
-    volume.setFormationDuration(vortexParams.formationDuration);
+    stars = createStarField(sim, renderer.pixelRatio, { speedRef: 12.0, boost: 1.0, brightMaxLum: 1.6, dynamicColor: true });
+    haze = createEnergyHaze(vortexParams.radius);
     vortexCore = createVortexCore(vortexParams.radius);
-    // V6 辅助能量丝：少量（Ribbon Amount）、细线、低透明、Catmull-Rom 平滑短弧
-    trails = createTrailRenderer(sim, vortexParams.ribbonAmount);
+    trails = createTrailRenderer(sim);
     trails.setPersistence(vortexParams.trailPersistence);
     trails.setBrightness(vortexParams.trailBrightness);
     trails.setSaturation(vortexParams.blueSaturation);
-    trails.setWidth(vortexParams.trailWidth);
-    trails.setScrollSpeed(vortexParams.flowScrollSpeed);
     trails.setResolution(window.innerWidth, window.innerHeight);
     vortexCore.setWhiteRadius(vortexParams.coreWhiteRadius);
     // ?layers= 调试图层隔离：trails / points / none
@@ -176,8 +166,8 @@ function regenerate(): void {
       renderer.scene.add(stars.normal);
       renderer.scene.add(stars.bright);
     }
-    if (layers !== 'none') {
-      renderer.scene.add(volume.object);
+    if (layers !== 'trails' && layers !== 'points') {
+      renderer.scene.add(haze.mesh);
       // ?core=0 调试：隔离核心层
       if (urlParams.get('core') !== '0') renderer.scene.add(vortexCore.mesh);
     }
@@ -185,14 +175,15 @@ function regenerate(): void {
       renderer.scene.add(trails.object);
     }
 
-    // 预热：只快进 12 步（0.2 模拟秒）——Formation 形成动画从头对用户可见
-    for (let i = 0; i < 12; i++) {
+    // 预热：快进 240 步（4 模拟秒）并记录满 96 格历史——
+    // 压缩流充分发展（部分粒子已潜入核心并回收），首帧即有完整向心螺旋长弧
+    for (let i = 0; i < 240; i++) {
       sim.update(1 / 60);
       trails.sync(sim.time);
     }
     sim.syncSpeed();
     stars.sync(sim.time);
-    volume.sync(sim.time);
+    haze.sync(sim.time);
     vortexCore.sync(sim.time);
 
     const azim = Number.isFinite(urlAzim) ? urlAzim : 28;
@@ -224,35 +215,12 @@ const ui = new Ui(params, vortexParams, engine, {
   onBloomToggle: (v) => renderer.setBloom(v),
   onHudToggle: (v) => ui.setHudVisible(v),
   onTrailChange: (v) => trails?.setPersistence(v),
-  // V6 实时调整（无需重建）：体积旋转/密度/湍流/Formation 时长 + 泛光强度，
-  // 以及核心旋转 / 压缩 / 湍流同步进 sim.params（构造时被浅拷贝）
+  // 颜色系统四项实时调整（无需重建）：饱和度 / 流线亮度 / 核心白半径 / 泛光强度
   onColorLive: () => {
-    volume?.setSpin(vortexParams.coreSpin, vortexParams.outerSpin);
-    volume?.setDensity(vortexParams.volumeDensity);
-    volume?.setTurbulence(vortexParams.turbulence);
-    volume?.setFormationDuration(vortexParams.formationDuration);
+    trails?.setSaturation(vortexParams.blueSaturation);
+    trails?.setBrightness(vortexParams.trailBrightness);
     vortexCore?.setWhiteRadius(vortexParams.coreWhiteRadius);
     renderer.setBloomParams(vortexParams.bloomStrength, 0.3, 0.75);
-    if (sim instanceof VortexFieldSimulation) {
-      sim.params.coreSpin = vortexParams.coreSpin;
-      sim.params.compression = vortexParams.compression;
-      sim.params.turbulence = vortexParams.turbulence;
-    }
-  },
-  // Ribbon Amount 变化：只重建辅助能量丝层（不重建模拟）
-  onTrailRebuild: () => {
-    if (!trails || !sim) return;
-    const inScene = trails.object.parent === renderer.scene;
-    renderer.scene.remove(trails.object);
-    trails.dispose();
-    trails = createTrailRenderer(sim, vortexParams.ribbonAmount);
-    trails.setPersistence(vortexParams.trailPersistence);
-    trails.setBrightness(vortexParams.trailBrightness);
-    trails.setSaturation(vortexParams.blueSaturation);
-    trails.setWidth(vortexParams.trailWidth);
-    trails.setScrollSpeed(vortexParams.flowScrollSpeed);
-    trails.setResolution(window.innerWidth, window.innerHeight);
-    if (inScene) renderer.scene.add(trails.object);
   },
   onEngineChange: (e) => {
     // 引擎切换通过刷新页面完成：两个引擎的参数/相机/模式差异较大，重载最干净
@@ -289,7 +257,7 @@ function tick(now: number): void {
     coreGlow?.sync(sim.time);
     // 流线跟随模拟时间记录：Time Scale 降低时弧线长度不变，暂停时冻结
     trails?.sync(sim.time);
-    volume?.sync(sim.time);
+    haze?.sync(sim.time);
     vortexCore?.sync(sim.time);
   }
 
@@ -316,7 +284,7 @@ window.addEventListener('beforeunload', () => {
   stars.dispose();
   coreGlow?.dispose();
   glowPlane?.dispose();
-  volume?.dispose();
+  haze?.dispose();
   vortexCore?.dispose();
   trails?.dispose();
   renderer.dispose();
